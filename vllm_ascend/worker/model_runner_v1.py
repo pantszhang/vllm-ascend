@@ -188,6 +188,7 @@ else:
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.ascend_config import get_score_encoder_cache_config
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -809,11 +810,11 @@ class NPUModelRunner(GPUModelRunner):
                     del self.tmp_encoder_cache[mm_hash]
 
     def _async_process_scheduler_output(self, scheduler_output: "SchedulerOutput") -> None:
+        ec_manager_metadata = getattr(scheduler_output, "ec_manager_metadata", None)
+        assert ec_manager_metadata is not None, "SchedulerOutput.ec_manager_metadata is None, ec cache scheduling metadata missing"
         # Free the cached encoder outputs.
-        promoting_mm_hashes = getattr(scheduler_output, "promoting_mm_hashes", [])
-        cpu_get_encoder_mm_hashes = getattr(
-            scheduler_output, "cpu_get_encoder_mm_hashes", []
-        )
+        promoting_mm_hashes = ec_manager_metadata.promoting_mm_hashes
+        cpu_get_encoder_mm_hashes = ec_manager_metadata.cpu_get_encoder_mm_hashes
 
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             value = self.encoder_cache.pop(mm_hash, None)
@@ -1191,7 +1192,9 @@ class NPUModelRunner(GPUModelRunner):
             )
             encoder_outputs.extend(curr_group_outputs)
 
-        promoting_mm_hashes = getattr(scheduler_output, "promoting_mm_hashes", [])
+        ec_manager_metadata = getattr(scheduler_output, "ec_manager_metadata", None)
+        assert ec_manager_metadata is not None, "SchedulerOutput.ec_manager_metadata is None, ec cache scheduling metadata missing"
+        promoting_mm_hashes = ec_manager_metadata.promoting_mm_hashes
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
