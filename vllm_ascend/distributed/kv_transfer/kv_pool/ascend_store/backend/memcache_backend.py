@@ -142,6 +142,22 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         return self.store.batch_alloc(keys, sizes)
 
+    def batch_copy(
+        self,
+        gvas: list[int],
+        addrs: list[int],
+        sizes: list[int],
+        direction: int,
+    ) -> int:
+        """Direct GVA copy -- caller manages alloc/get_info separately."""
+        assert self.store is not None
+        return self.store.batch_copy(gvas, addrs, sizes, direction)
+
+    def remove(self, key: str) -> int:
+        """Delete a key and all associated blobs (DRAM + SSD)."""
+        assert self.store is not None
+        return self.store.remove(key)
+
     def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
         assert self.store is not None
         return self.store.batch_add_lease(keys, lease_ttl_ms)

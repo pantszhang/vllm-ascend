@@ -8,6 +8,10 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.request import Request
 
 from vllm_ascend.ascend_config import get_score_encoder_cache_config
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+    MemcacheBackend,
+)
+from vllm_ascend.ec_manager.metrics import ECMemCacheMetrics
 
 logger = init_logger(__name__)
 
@@ -91,6 +95,18 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         # Hardware throughput (FLOPs)
         self.hardware_flops = 4 * 1e14
+
+        # ── MemCache integration ──
+        self._use_memcache = score_encoder_cache_config.use_memcache
+        self._store = None
+        self._metrics = ECMemCacheMetrics(
+            enable=score_encoder_cache_config.memcache_metrics_enable,
+            log_interval_steps=score_encoder_cache_config.memcache_metrics_interval,
+        )
+        if self._use_memcache:
+            self._store = MemcacheBackend.create_scheduler_client(
+                parallel_config=vllm_config.parallel_config
+            )
 
         # TODO: there may be more kinds of compute ways
         # Coefficients used to estimate the compute cost of encoder embeddings
@@ -248,8 +264,20 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
             mm_hash, ent = self.cpu_freeable.popitem(last=False)
             del self.cached[mm_hash]
             del self.cpu_cache[mm_hash]
+            # MemCache integration: remove data from global pool
+            if self._use_memcache and self._store is not None:
+                try:
+                    key = f"ec_{mm_hash}"
+                    self._store.remove(key)
+                except Exception:
+                    logger.debug(
+                        "EC eviction: remove failed for %s",
+                        mm_hash,
+                        exc_info=True,
+                    )
             self.freed.append(mm_hash)
             self.cpu_num_free_slots += ent.num_embeds
+            self._metrics.record_remove(mm_hash, 0)
 
         return True
 

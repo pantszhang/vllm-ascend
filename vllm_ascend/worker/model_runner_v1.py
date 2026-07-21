@@ -40,7 +40,7 @@ from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_f
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group, get_world_group
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention, MLAAttention
@@ -179,6 +179,12 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+    MemcacheBackend,
+    MmcDirect,
+)
+from vllm_ascend.ec_manager.metrics import ECMemCacheMetrics
+
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -274,6 +280,24 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+def _get_encoder_cache_hidden_dim(vllm_config):
+    """Return per-token hidden dimension for encoder cache entries."""
+    model_config = vllm_config.model_config
+    hf_config = getattr(model_config, "hf_config", None)
+    vision_config = (
+        getattr(hf_config, "vision_config", None)
+        if hf_config is not None else None
+    )
+    if vision_config is not None:
+        out_hidden_size = getattr(vision_config, "out_hidden_size", None)
+        deepstack_indexes = getattr(
+            vision_config, "deepstack_visual_indexes", None
+        )
+        if out_hidden_size is not None and deepstack_indexes:
+            return out_hidden_size * (1 + len(deepstack_indexes))
+    return model_config.get_inputs_embeds_size()
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -617,13 +641,28 @@ class NPUModelRunner(GPUModelRunner):
                 block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
                 parallel_config=self.parallel_config, dtype=self.dtype)
 
-        # score encoder cache相关
+        # score encoder cache
         self.tmp_encoder_cache: dict[str, torch.Tensor] = {}
         self.cpu_encoder_cache: dict[str, torch.Tensor] = {}
         self.cached: dict[str, set[str]] = {}
         self._pending_encoder_cache_copies: deque[
             tuple[torch.Tensor, torch.npu.Event]
         ] = deque()
+
+        # MemCache EC store (independent from KV cache)
+        score_cfg = get_ascend_config().score_encoder_cache_config
+        self._use_ec_memcache = score_cfg.enabled and score_cfg.use_memcache
+        self._ec_store = None
+        if self._use_ec_memcache:
+            self._ec_store = MemcacheBackend(
+                parallel_config=self.parallel_config,
+                local_rank=get_world_group().local_rank,
+                init_bm=True,
+            )
+        self._ec_metrics = ECMemCacheMetrics(
+            enable=score_cfg.memcache_metrics_enable,
+            log_interval_steps=score_cfg.memcache_metrics_interval,
+        )
 
     @property
     def use_cp(self) -> bool:
@@ -860,6 +899,89 @@ class NPUModelRunner(GPUModelRunner):
             getattr(scheduler_output, "ec_manager_metadata", None),
         )
 
+    def _save_to_memcache(
+        self, mm_hash: str, tensor: torch.Tensor
+    ) -> bool:
+        """Save NPU tensor -> MemCache via GVA direct transfer (L2G).
+
+        Returns True on success, False on failure.
+        """
+        if not self._use_ec_memcache or self._ec_store is None:
+            return False
+        key = f"ec_{mm_hash}"
+        size = tensor.numel() * tensor.element_size()
+        gva_list = self._ec_store.batch_alloc([key], [size])
+        if not gva_list or gva_list[0] == 0:
+            self._ec_metrics.record_alloc_failure(mm_hash)
+            return False
+        ret = self._ec_store.batch_copy(
+            [gva_list[0]],
+            [tensor.data_ptr()],
+            [size],
+            MmcDirect.COPY_L2G.value,
+        )
+        if ret != 0:
+            self._ec_metrics.record_copy_error(mm_hash, "L2G")
+            return False
+        self._ec_metrics.record_save(mm_hash, size)
+        return True
+
+    def _load_from_memcache(
+        self,
+        mm_hash: str,
+        *,
+        non_blocking: bool = True,
+    ) -> torch.Tensor | None:
+        """Load embedding from MemCache -> NPU HBM via GVA direct transfer (G2L).
+
+        Computes tensor shape from MemCache key_info size automatically.
+        Returns tensor on NPU device, or None on miss / error.
+        """
+        if not self._use_ec_memcache or self._ec_store is None:
+            return None
+        key = f"ec_{mm_hash}"
+        key_infos = self._ec_store.batch_get_key_info([key], flag=1)
+        if key_infos is None or len(key_infos) == 0 or key_infos[0].size() == 0:
+            self._ec_metrics.record_memcache_miss(mm_hash)
+            return None
+        gva_list = key_infos[0].gva_list()
+        if not gva_list or gva_list[0] == 0:
+            self._ec_metrics.record_memcache_miss(mm_hash)
+            return None
+
+        size_bytes = key_infos[0].size()
+        hidden_dim = _get_encoder_cache_hidden_dim(self.vllm_config)
+        element_size = torch.empty(0, dtype=self.dtype).element_size()
+        token_bytes = hidden_dim * element_size
+        if size_bytes % token_bytes != 0:
+            logger.warning(
+                "EC load: size_bytes=%d not divisible by token_bytes=%d for %s",
+                size_bytes, token_bytes, mm_hash,
+            )
+            return None
+        num_tokens = size_bytes // token_bytes
+
+        tensor = torch.empty(
+            num_tokens, hidden_dim, dtype=self.dtype, device=self.device
+        )
+        ret = self._ec_store.batch_copy(
+            [gva_list[0]],
+            [tensor.data_ptr()],
+            [size_bytes],
+            MmcDirect.COPY_G2L.value,
+        )
+        if ret != 0:
+            self._ec_metrics.record_copy_error(mm_hash, "G2L")
+            return None
+
+        type_list = key_infos[0].type_list()
+        media = "SSD" if type_list and 2 in type_list else "DRAM"
+        self._ec_metrics.record_memcache_hit(mm_hash, media)
+
+        if not non_blocking:
+            torch.npu.current_stream().synchronize()
+        return tensor
+
     def _on_request_state_removed(self, req_id: str, req_state: Any | None) -> None:
         self.free_tmp_cache(req_id, req_state)
 
@@ -867,44 +989,58 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> None:
-        self._clear_finished_encoder_cache_copies()
         ec_manager_metadata = self._get_score_encoder_cache_metadata(scheduler_output)
         if ec_manager_metadata is None:
             for mm_hash in scheduler_output.free_encoder_mm_hashes:
                 self.encoder_cache.pop(mm_hash, None)
             return
 
-        # Free the cached encoder outputs.
         promoting_mm_hashes = ec_manager_metadata.promoting_mm_hashes
         cpu_get_encoder_mm_hashes = ec_manager_metadata.cpu_get_encoder_mm_hashes
 
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             value = self.encoder_cache.pop(mm_hash, None)
             if value is None and mm_hash not in promoting_mm_hashes:
-                self.cpu_encoder_cache.pop(mm_hash, None)
+                if not self._use_ec_memcache:
+                    self.cpu_encoder_cache.pop(mm_hash, None)
 
+        # -- Promotion: remote storage -> NPU HBM (encoder_cache) --
         for mm_hash in promoting_mm_hashes:
-            cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
-            if cpu_value is None:
+            if mm_hash in self.encoder_cache or mm_hash in self.tmp_encoder_cache:
                 continue
+            if self._use_ec_memcache:
+                self._ec_metrics.record_promotion(mm_hash)
+                tensor = self._load_from_memcache(mm_hash)
+                if tensor is not None:
+                    self.encoder_cache[mm_hash] = tensor
+            else:
+                cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
+                if cpu_value is None:
+                    continue
+                self.encoder_cache[mm_hash] = self._copy_cpu_encoder_cache_to_device(
+                    cpu_value
+                )
 
-            self.encoder_cache[mm_hash] = self._copy_cpu_encoder_cache_to_device(
-                cpu_value
-            )
-
+        # -- Lazy load: remote storage -> NPU HBM (tmp_encoder_cache) --
         for mm_hash in cpu_get_encoder_mm_hashes:
             if mm_hash in self.encoder_cache or mm_hash in self.tmp_encoder_cache:
                 continue
-            cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
-            if cpu_value is None:
-                continue
-            self.tmp_encoder_cache[mm_hash] = self._copy_cpu_encoder_cache_to_device(
-                cpu_value
-            )
+            if self._use_ec_memcache:
+                tensor = self._load_from_memcache(mm_hash)
+                if tensor is not None:
+                    self.tmp_encoder_cache[mm_hash] = tensor
+            else:
+                cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
+                if cpu_value is None:
+                    continue
+                self.tmp_encoder_cache[mm_hash] = self._copy_cpu_encoder_cache_to_device(
+                    cpu_value
+                )
 
     def _get_encoder_output_from_cache(self, mm_hash: str) -> torch.Tensor | None:
         encoder_output = self.encoder_cache.get(mm_hash, None)
         if encoder_output is not None:
+            self._ec_metrics.record_hbm_hit(mm_hash)
             return encoder_output
 
         encoder_output = self.tmp_encoder_cache.get(mm_hash, None)
@@ -914,14 +1050,18 @@ class NPUModelRunner(GPUModelRunner):
         if not get_score_encoder_cache_config(self.vllm_config).enabled:
             return None
 
+        # MemCache path: GVA direct transfer (no CPU staging)
+        if self._use_ec_memcache:
+            encoder_output = self._load_from_memcache(mm_hash, non_blocking=False)
+            if encoder_output is not None:
+                self.tmp_encoder_cache[mm_hash] = encoder_output
+            return encoder_output
+
+        # Legacy CPU offload path
         cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
         if cpu_value is None:
             return None
 
-        # The score encoder cache scheduler asks the worker to stage CPU cache
-        # hits into a device cache before gather.  Keep a defensive synchronous
-        # fallback here so a stale worker-side temporary entry cannot turn a
-        # scheduler CPU-cache hit into an engine-fatal cache miss.
         encoder_output = self._copy_cpu_encoder_cache_to_device(
             cpu_value, non_blocking=False
         )
@@ -931,10 +1071,16 @@ class NPUModelRunner(GPUModelRunner):
     def _has_encoder_output_in_cache(self, mm_hash: str) -> bool:
         if mm_hash in self.encoder_cache or mm_hash in self.tmp_encoder_cache:
             return True
-        return (
-            get_score_encoder_cache_config(self.vllm_config).enabled
-            and mm_hash in self.cpu_encoder_cache
-        )
+        if not get_score_encoder_cache_config(self.vllm_config).enabled:
+            return False
+        if self._use_ec_memcache:
+            # MemCache existence check via batch_is_exist (fast RPC)
+            if self._ec_store is not None:
+                key = f"ec_{mm_hash}"
+                res = self._ec_store.batch_is_exist([key])
+                return bool(res and res[0])
+            return False
+        return mm_hash in self.cpu_encoder_cache
 
     def _get_encoder_cache_view(self) -> _EncoderCacheView:
         return _EncoderCacheView(
@@ -989,9 +1135,14 @@ class NPUModelRunner(GPUModelRunner):
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
             return
 
-        staging = torch.empty_like(output, device="cpu", pin_memory=True)
-        staging.copy_(output.detach(), non_blocking=True)
-        self.cpu_encoder_cache[mm_hash] = staging
+        # Save to MemCache via GVA direct transfer (no CPU staging)
+        if self._use_ec_memcache:
+            self._save_to_memcache(mm_hash, output)
+        else:
+            # Legacy CPU offload path
+            staging = torch.empty_like(output, device="cpu", pin_memory=True)
+            staging.copy_(output.detach(), non_blocking=True)
+            self.cpu_encoder_cache[mm_hash] = staging
 
         if (
             mm_hash in promoting_mm_hashes

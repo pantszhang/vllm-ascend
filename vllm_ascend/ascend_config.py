@@ -802,39 +802,60 @@ class ScoreEncoderCacheConfig:
     """
 
     def __init__(self, score_encoder_cache_config: dict, vllm_config):
-        """
-        Initialize ScoreEncoderCacheConfig.
-
-        Args:
-            score_encoder_cache_config (dict):
-                A dictionary containing configuration parameters
-                for the encoder cache scoring policy.
-        """
-
-        # Whether to enable the score-based encoder cache management policy
+        # ── Feature gates ──
         self.enabled = score_encoder_cache_config.get("enabled", False)
+        self.use_memcache = score_encoder_cache_config.get(
+            "use_memcache", False
+        )
 
-        # Maximum number of encoder cache slots available on the CPU side
-        self.cpu_cache_slots = score_encoder_cache_config.get("cpu_cache_slots", 100000)
-
-        # Maximum clock value used by the clock mechanism,
-        # representing the highest activity or freshness level of a cache entry
+        # ── NPU cache (existing, unchanged) ──
+        self.cpu_cache_slots = score_encoder_cache_config.get(
+            "cpu_cache_slots", 100000
+        )
         self.max_clock = score_encoder_cache_config.get("max_clock", 15)
-
-        # Number of operations between clock decay steps.
-        # Clock decay gradually decreases the score of cache entries
-        # that have not been accessed for a long time.
-        self.clock_decay_every = score_encoder_cache_config.get("clock_decay_every", 64)
-
-        # Cache watermark threshold. When eviction is triggered,
-        # cache entries will be continuously removed until the cache
-        # usage ratio drops below this threshold.
+        self.clock_decay_every = score_encoder_cache_config.get(
+            "clock_decay_every", 64
+        )
         self.watermark = score_encoder_cache_config.get("watermark", 0.2)
+        self.promote_percentile = score_encoder_cache_config.get(
+            "promote_percentile", 0.2
+        )
 
-        # Promotion percentile threshold.
-        # If the score of a cache entry exceeds this percentile
-        # in the overall score distribution, the entry can be promoted.
-        self.promote_percentile = score_encoder_cache_config.get("promote_percentile", 0.2)
+        # ── MemCache connection ──
+        self.memcache_meta_url = score_encoder_cache_config.get(
+            "ec_memcache_meta_service_url", "tcp://127.0.0.1:5000"
+        )
+        self.memcache_config_store_url = score_encoder_cache_config.get(
+            "ec_memcache_config_store_url", "tcp://127.0.0.1:6000"
+        )
+        self.memcache_protocol = score_encoder_cache_config.get(
+            "ec_memcache_protocol", "host_shm"
+        )
+
+        # ── MemCache capacity (bytes) ──
+        self.memcache_dram_size = score_encoder_cache_config.get(
+            "ec_memcache_dram_size", "4GB"
+        )
+        self.memcache_ssd_size = score_encoder_cache_config.get(
+            "ec_memcache_ssd_size", "0GB"
+        )
+        self.memcache_ssd_path = score_encoder_cache_config.get(
+            "ec_memcache_ssd_path", ""
+        )
+        self.memcache_evict_high = score_encoder_cache_config.get(
+            "ec_memcache_evict_high", 80
+        )
+        self.memcache_evict_low = score_encoder_cache_config.get(
+            "ec_memcache_evict_low", 70
+        )
+
+        # ── Observability ──
+        self.memcache_metrics_enable = score_encoder_cache_config.get(
+            "ec_memcache_metrics_enable", False
+        )
+        self.memcache_metrics_interval = score_encoder_cache_config.get(
+            "ec_memcache_metrics_interval_steps", 300
+        )
 
 
 class EplbConfig:
