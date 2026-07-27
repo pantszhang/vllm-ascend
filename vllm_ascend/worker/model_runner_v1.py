@@ -2077,7 +2077,14 @@ class NPUModelRunner(GPUModelRunner):
                     scheduler_output
                 )
 
-                if has_ec_transfer() and get_ec_transfer().is_producer:
+                ec = get_ec_transfer()
+                ec_config = self.vllm_config.ec_transfer_config
+                extra = ec_config.ec_connector_extra_config if ec_config else {}
+                is_ec_memcache_both = (
+                    extra.get("backend", "") == "memcache" and ec.is_consumer
+                )
+
+                if has_ec_transfer() and ec.is_producer and not is_ec_memcache_both:
                     self._start_dump_data()
                     with self.maybe_get_ec_connector_output(
                         scheduler_output,
