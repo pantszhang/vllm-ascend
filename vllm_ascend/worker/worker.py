@@ -163,9 +163,22 @@ class NPUWorker(WorkerBase):
         # Embedding memcache offload: inject custom EncoderCacheManager
         ascend_config = get_ascend_config()
         if ascend_config.ec_memcache_config.enabled:
-            self.vllm_config.ec_manager_config.encoder_cache_manager_cls = (
+            import importlib
+            class _EcManagerCfg:
+                encoder_cache_manager_cls: str | None = None
+                def get_encoder_cache_manager_obj(self):
+                    cls_path = self.encoder_cache_manager_cls
+                    if cls_path is None:
+                        return None
+                    mod_name, cls_name = cls_path.rsplit(".", 1)
+                    mod = importlib.import_module(mod_name)
+                    return getattr(mod, cls_name)
+            cfg = _EcManagerCfg()
+            cfg.encoder_cache_manager_cls = (
                 "vllm_ascend.core.ec_manager_with_store.EncoderCacheManagerWithStore"
             )
+            # Bypass pydantic __setattr__ by writing directly to __dict__
+            self.vllm_config.__dict__["ec_manager_config"] = cfg
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:

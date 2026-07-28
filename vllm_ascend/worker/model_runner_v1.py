@@ -294,10 +294,15 @@ class NPUModelRunner(GPUModelRunner):
 
         # Embedding memcache offload
         ascend_config = get_ascend_config()
+        _cfg_enabled = ascend_config.ec_memcache_config.enabled
+        _mm_inputs = self.supports_mm_inputs
+        _is_first = get_pp_group().is_first_rank
         self.use_ec_memcache_offload = (
-            ascend_config.ec_memcache_config.enabled
-            and self.supports_mm_inputs
-            and get_pp_group().is_first_rank
+            _cfg_enabled and _mm_inputs and _is_first
+        )
+        logger.info(
+            "EC memcache check: enabled=%s supports_mm_inputs=%s is_first_pp=%s -> use_ec_memcache_offload=%s",
+            _cfg_enabled, _mm_inputs, _is_first, self.use_ec_memcache_offload,
         )
         if self.use_ec_memcache_offload:
             from vllm_ascend.distributed.ec_transfer.encoder_cache_store import (
