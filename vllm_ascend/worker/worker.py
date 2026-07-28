@@ -163,7 +163,14 @@ class NPUWorker(WorkerBase):
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
 
-        ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        # Embedding memcache offload: inject custom EncoderCacheManager
+        ascend_config = get_ascend_config()
+        if ascend_config.ec_memcache_config.enabled:
+            self.vllm_config.ec_manager_config.encoder_cache_manager_cls = (
+                "vllm_ascend.core.ec_manager_with_store.EncoderCacheManagerWithStore"
+            )
+
+        ascend_compilation_config = ascend_config.ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
             # Prevent duplicate triggers, execute the exit logic only once
             shutdown_request = False
