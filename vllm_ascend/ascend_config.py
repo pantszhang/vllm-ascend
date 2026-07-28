@@ -24,6 +24,17 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+class ECMemcacheConfig:
+    """Configuration for encoder embedding memcache offload.
+
+    All parameters can be configured via ``additional_config.ec_memcache_config``
+    in the vLLM config.
+    """
+
+    def __init__(self, enabled: bool = False, **kwargs):
+        self.enabled = enabled
+
+
 class AscendConfig:
     """
     Configuration Object for additional_config from vllm.configs.
@@ -48,6 +59,9 @@ class AscendConfig:
 
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
+
+        ec_memcache_config = additional_config.get("ec_memcache_config", {})
+        self.ec_memcache_config = ECMemcacheConfig(**ec_memcache_config)
 
         from vllm_ascend import envs as ascend_envs
 

@@ -37,6 +37,7 @@ import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.parallel_state import get_world_group
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -290,6 +291,23 @@ class NPUModelRunner(GPUModelRunner):
             super().__init__(vllm_config, device)
 
         self.pin_memory = PIN_MEMORY
+
+        # Embedding memcache offload
+        ascend_config = get_ascend_config()
+        self.use_ec_memcache_offload = (
+            ascend_config.ec_memcache_config.enabled
+            and self.supports_mm_inputs
+            and get_pp_group().is_first_rank
+        )
+        if self.use_ec_memcache_offload:
+            from vllm_ascend.distributed.ec_transfer.encoder_cache_store import (
+                EncoderCacheStore,
+            )
+            self.encoder_cache_store = EncoderCacheStore(
+                vllm_config, get_world_group().local_rank
+            )
+            # Release the plain dict created by upstream GPUModelRunner.__init__
+            self.encoder_cache = None
 
         set_offloader(create_offloader(self.offload_config))
 
@@ -1469,6 +1487,43 @@ class NPUModelRunner(GPUModelRunner):
             self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
         return mm_embeds, is_mm_embed
+
+    # ---- Embedding memcache offload overrides ----
+
+    def _cache_encoder_output(
+        self,
+        mm_hash: str,
+        output: torch.Tensor,
+        ec_manager_metadata,
+        free_encoder_mm_hashes: list[str],
+    ) -> None:
+        if self.use_ec_memcache_offload:
+            self.encoder_cache_store.put(mm_hash, output)
+        else:
+            self.encoder_cache[mm_hash] = output
+            self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
+
+    def _get_encoder_output_from_cache(
+        self, mm_hash: str
+    ) -> torch.Tensor | None:
+        if self.use_ec_memcache_offload:
+            return self.encoder_cache_store.get(mm_hash)
+        return self.encoder_cache.get(mm_hash, None)
+
+    def _process_encoder_cache_scheduler_output(
+        self, scheduler_output
+    ) -> None:
+        if self.use_ec_memcache_offload:
+            pass  # memcache manages its own eviction
+        else:
+            for mm_hash in scheduler_output.free_encoder_mm_hashes:
+                self.encoder_cache.pop(mm_hash, None)
+
+    def reset_encoder_cache(self) -> None:
+        if self.use_ec_memcache_offload:
+            pass  # memcache data managed at pool level
+        else:
+            self.encoder_cache.clear()
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
