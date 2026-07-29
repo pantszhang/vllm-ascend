@@ -661,6 +661,28 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
 def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Launch EngineCore busy loop in background process."""
     vllm_config = kwargs.get("vllm_config")
+
+    # ---- EC memcache offload: replace scheduler's EncoderCacheManager ----
+    # The installed vllm v0.23.0 scheduler hardcodes EncoderCacheManager and
+    # does not support custom ec_manager_config.  Monkey-patch it so the
+    # scheduler uses our memcache-backed EncoderCacheManagerWithStore instead.
+    if vllm_config is not None:
+        try:
+            from vllm_ascend.ascend_config import get_ascend_config
+            _asc_cfg = get_ascend_config()
+            if getattr(_asc_cfg.ec_memcache_config, "enabled", False):
+                import vllm.v1.core.sched.scheduler as _sched_mod
+                from vllm_ascend.core.ec_manager_with_store import (
+                    EncoderCacheManagerWithStore,
+                )
+                _sched_mod.EncoderCacheManager = EncoderCacheManagerWithStore
+                logger.info(
+                    "EC memcache: replaced scheduler EncoderCacheManager "
+                    "with EncoderCacheManagerWithStore"
+                )
+        except Exception:
+            pass  # best-effort: fall back to upstream EncoderCacheManager
+
     if not _balance_scheduling_enabled(vllm_config):
         return _ORIGINAL_RUN_ENGINE_CORE(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 

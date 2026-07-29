@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import zmq
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm_ascend.distributed.ec_transfer.ec_memcache_backend import EcMemcacheBackend
 from vllm_ascend.distributed.ec_transfer.ec_store_client import (
@@ -35,8 +35,6 @@ _COPY_G2L = 1  # global (memcache pool) → local (NPU)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-logger = init_logger(__name__)
 
 # read-configurable TTL for the local gvaBlobTracker lease during batch_copy(G2L)
 LEASE_READ_TTL_MS = 60_000
