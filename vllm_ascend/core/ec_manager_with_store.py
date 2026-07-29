@@ -55,6 +55,11 @@ class EncoderCacheManagerWithStore(EncoderCacheManager):
             f"/ec_lookup_dp_rank{dp_rank}"
         )
         self._ec_store_client = EncoderCacheStoreClient(socket_path)
+        logger.info(
+            "EncoderCacheManagerWithStore instantiated: cache_size=%d socket=%s",
+            cache_size,
+            socket_path,
+        )
 
     # ---- overrides ----
 
