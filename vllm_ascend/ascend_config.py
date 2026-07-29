@@ -60,15 +60,11 @@ class AscendConfig:
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
-<<<<<<< HEAD
         weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
-=======
+
         ec_memcache_config = additional_config.get("ec_memcache_config", {})
         self.ec_memcache_config = ECMemcacheConfig(**ec_memcache_config)
-
-        from vllm_ascend import envs as ascend_envs
->>>>>>> b271dd3b9 (fix: use get_world_group().local_rank instead of envs.LOCAL_RANK)
 
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
         self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
