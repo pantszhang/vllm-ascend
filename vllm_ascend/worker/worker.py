@@ -182,6 +182,16 @@ class NPUWorker(WorkerBase):
             )
             # Bypass pydantic __setattr__ by writing directly to __dict__
             self.vllm_config.__dict__["ec_manager_config"] = cfg
+            # Patch with_hf_config so ec_manager_config survives replace().
+            # Older installed vLLM doesn't have this field — replace() strips
+            # it because is_init_field() returns False for unknown keys.
+            _orig_with_hf_config = type(self.vllm_config).with_hf_config
+            _stashed_cfg = cfg
+            def _patched_with_hf_config(vllm_self, *args, **kwargs):
+                result = _orig_with_hf_config(vllm_self, *args, **kwargs)
+                result.__dict__.setdefault("ec_manager_config", _stashed_cfg)
+                return result
+            type(self.vllm_config).with_hf_config = _patched_with_hf_config
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
