@@ -21,7 +21,7 @@ import os
 from typing import TYPE_CHECKING
 
 import vllm.envs as vllm_envs
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 
 from vllm_ascend.distributed.ec_transfer.ec_store_client import (
@@ -30,8 +30,6 @@ from vllm_ascend.distributed.ec_transfer.ec_store_client import (
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
-
-logger = init_logger(__name__)
 
 
 class EncoderCacheManagerWithStore(EncoderCacheManager):
