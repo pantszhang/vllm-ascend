@@ -326,8 +326,6 @@ class NPUModelRunner(GPUModelRunner):
             self.encoder_cache_store = EncoderCacheStore(
                 vllm_config, get_world_group().local_rank
             )
-            # Release the plain dict created by upstream GPUModelRunner.__init__
-            self.encoder_cache = None
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -1455,24 +1453,26 @@ class NPUModelRunner(GPUModelRunner):
         ec_manager_metadata,
         free_encoder_mm_hashes: list[str],
     ) -> None:
+        self.encoder_cache[mm_hash] = output
+        self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
         if self.use_ec_memcache_offload:
             logger.info("EC memcache STORE: mm_hash=%s bytes=%d", mm_hash, output.nbytes)
             self.encoder_cache_store.put(mm_hash, output)
-        else:
-            self.encoder_cache[mm_hash] = output
-            self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
     def _get_encoder_output_from_cache(
         self, mm_hash: str
     ) -> torch.Tensor | None:
+        if mm_hash in self.encoder_cache:
+            logger.info("EC cache LOCAL_HIT: mm_hash=%s", mm_hash)
+            return self.encoder_cache[mm_hash]
         if self.use_ec_memcache_offload:
             tensor = self.encoder_cache_store.get(mm_hash)
             if tensor is not None:
                 logger.info("EC memcache HIT: mm_hash=%s", mm_hash)
-            else:
-                logger.info("EC memcache MISS: mm_hash=%s", mm_hash)
-            return tensor
-        return self.encoder_cache.get(mm_hash, None)
+                self.encoder_cache[mm_hash] = tensor
+                return tensor
+            logger.info("EC memcache MISS: mm_hash=%s", mm_hash)
+        return None
 
     def _process_encoder_cache_scheduler_output(
         self, scheduler_output
@@ -3704,13 +3704,7 @@ class NPUModelRunner(GPUModelRunner):
         # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
         if self.pcp_size > 1:
             self.max_num_tokens = math.ceil(self.max_num_tokens / (self.pcp_size * 2)) * 2
-        if self.use_ec_memcache_offload:
-            # Upstream profile_run writes profiling tensors to encoder_cache.
-            # We replaced the dict with None in __init__; temporarily restore.
-            self.encoder_cache = {}
         super().profile_run()
-        if self.use_ec_memcache_offload:
-            self.encoder_cache = None
         self.max_num_tokens = origin_max_num_tokens
 
     def eplb_warmup(self):
