@@ -669,10 +669,8 @@ def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     # Read config from vllm_config directly — global get_ascend_config() is
     # unavailable in the EngineCore subprocess (module-level globals are reset).
     if vllm_config is not None:
-        ec_cfg = (vllm_config.additional_config or {}).get(
-            "ec_memcache_config", {}
-        )
-        if ec_cfg.get("enabled", False):
+        _add_cfg = getattr(vllm_config, "additional_config", None) or {}
+        if isinstance(_add_cfg, dict) and _add_cfg.get("ec_memcache_config", {}).get("enabled", False):
             import vllm.v1.core.sched.scheduler as _sched_mod
             from vllm_ascend.core.ec_manager_with_store import (
                 EncoderCacheManagerWithStore,
