@@ -326,6 +326,50 @@ class NPUModelRunner(GPUModelRunner):
             self.encoder_cache_store = EncoderCacheStore(
                 vllm_config, get_world_group().local_rank
             )
+            # Wrap encoder_cache dict with a proxy that mirrors all
+            # writes to memcache and checks memcache on cache misses.
+            # v0.23.0 reads/writes the dict directly (no override
+            # methods), so this is the only way to intercept the ops.
+            _store = self.encoder_cache_store
+            _real_dict = self.encoder_cache
+
+            class _EcMemcacheDict(dict):
+                def __setitem__(self, key, value):
+                    super().__setitem__(key, value)
+                    if not isinstance(key, str) or key.startswith("tmp_"):
+                        return  # skip profile_run temp keys
+                    try:
+                        _store.put(key, value)
+                        logger.info(
+                            "EC memcache STORE: mm_hash=%s bytes=%d",
+                            key, value.nbytes,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "EC memcache STORE failed: %s key=%s", e, key,
+                        )
+
+                def get(self, key, default=None):
+                    if key in self:
+                        logger.info("EC cache LOCAL_HIT: mm_hash=%s", key)
+                        return super().get(key, default)
+                    if isinstance(key, str) and not key.startswith("tmp_"):
+                        try:
+                            tensor = _store.get(key)
+                            if tensor is not None:
+                                logger.info(
+                                    "EC memcache HIT: mm_hash=%s", key,
+                                )
+                                self[key] = tensor  # backfill local
+                                return tensor
+                        except Exception as e:
+                            logger.warning(
+                                "EC memcache GET failed: %s key=%s", e, key,
+                            )
+                    logger.info("EC memcache MISS: mm_hash=%s", key)
+                    return super().get(key, default)
+
+            self.encoder_cache = _EcMemcacheDict(_real_dict)
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
