@@ -3704,7 +3704,13 @@ class NPUModelRunner(GPUModelRunner):
         # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
         if self.pcp_size > 1:
             self.max_num_tokens = math.ceil(self.max_num_tokens / (self.pcp_size * 2)) * 2
+        if self.use_ec_memcache_offload:
+            # Upstream profile_run writes profiling tensors to encoder_cache.
+            # We replaced the dict with None in __init__; temporarily restore.
+            self.encoder_cache = {}
         super().profile_run()
+        if self.use_ec_memcache_offload:
+            self.encoder_cache = None
         self.max_num_tokens = origin_max_num_tokens
 
     def eplb_warmup(self):
