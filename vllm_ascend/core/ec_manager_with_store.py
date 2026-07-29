@@ -21,6 +21,7 @@ import os
 from typing import TYPE_CHECKING
 
 import vllm.envs as vllm_envs
+from vllm.logger import init_logger
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 
 from vllm_ascend.distributed.ec_transfer.ec_store_client import (
@@ -29,6 +30,8 @@ from vllm_ascend.distributed.ec_transfer.ec_store_client import (
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 class EncoderCacheManagerWithStore(EncoderCacheManager):
@@ -63,13 +66,16 @@ class EncoderCacheManagerWithStore(EncoderCacheManager):
         # 1. Local hot cache (nanosecond)
         if mm_hash in self.cached:
             self.cached[mm_hash].add(request.request_id)
+            logger.info("EC lookup LOCAL_HIT: mm_hash=%s", mm_hash)
             return True
 
         # 2. ZMQ → memcache exists query (global truth)
         if self._ec_store_client.exists(mm_hash):
             self.cached[mm_hash] = {request.request_id}
+            logger.info("EC lookup MEMCACHE_HIT: mm_hash=%s", mm_hash)
             return True
 
+        logger.info("EC lookup MISS (will compute): mm_hash=%s", mm_hash)
         return False
 
     def allocate(self, request: "Request", input_id: int) -> None:
