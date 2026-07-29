@@ -1458,6 +1458,7 @@ class NPUModelRunner(GPUModelRunner):
         free_encoder_mm_hashes: list[str],
     ) -> None:
         if self.use_ec_memcache_offload:
+            logger.info("EC memcache STORE: mm_hash=%s bytes=%d", mm_hash, output.nbytes)
             self.encoder_cache_store.put(mm_hash, output)
         else:
             self.encoder_cache[mm_hash] = output
@@ -1467,7 +1468,12 @@ class NPUModelRunner(GPUModelRunner):
         self, mm_hash: str
     ) -> torch.Tensor | None:
         if self.use_ec_memcache_offload:
-            return self.encoder_cache_store.get(mm_hash)
+            tensor = self.encoder_cache_store.get(mm_hash)
+            if tensor is not None:
+                logger.info("EC memcache HIT: mm_hash=%s", mm_hash)
+            else:
+                logger.info("EC memcache MISS: mm_hash=%s", mm_hash)
+            return tensor
         return self.encoder_cache.get(mm_hash, None)
 
     def _process_encoder_cache_scheduler_output(
