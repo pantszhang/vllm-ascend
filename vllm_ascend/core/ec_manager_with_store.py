@@ -69,16 +69,28 @@ class EncoderCacheManagerWithStore(EncoderCacheManager):
         # 1. Local hot cache (nanosecond)
         if mm_hash in self.cached:
             self.cached[mm_hash].add(request.request_id)
-            logger.info("EC lookup LOCAL_HIT: mm_hash=%s", mm_hash)
+            logger.info(
+                "EC lookup LOCAL_HIT: mm_hash=%s cache_size=%d",
+                mm_hash,
+                len(self.cached),
+            )
             return True
 
         # 2. ZMQ → memcache exists query (global truth)
         if self._ec_store_client.exists(mm_hash):
             self.cached[mm_hash] = {request.request_id}
-            logger.info("EC lookup MEMCACHE_HIT: mm_hash=%s", mm_hash)
+            logger.info(
+                "EC lookup MEMCACHE_HIT: mm_hash=%s cache_size=%d",
+                mm_hash,
+                len(self.cached),
+            )
             return True
 
-        logger.info("EC lookup MISS (will compute): mm_hash=%s", mm_hash)
+        logger.info(
+            "EC lookup MISS (will compute): mm_hash=%s cache_size=%d",
+            mm_hash,
+            len(self.cached),
+        )
         return False
 
     def allocate(self, request: "Request", input_id: int) -> None:

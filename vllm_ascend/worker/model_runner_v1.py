@@ -351,16 +351,23 @@ class NPUModelRunner(GPUModelRunner):
 
                 def get(self, key, default=None):
                     if key in self:
-                        logger.info("EC cache LOCAL_HIT: mm_hash=%s", key)
-                        return super().get(key, default)
+                        tensor = super().get(key, default)
+                        logger.info(
+                            "EC cache LOCAL_HIT: mm_hash=%s bytes=%d",
+                            key,
+                            tensor.nbytes if tensor is not None else 0,
+                        )
+                        return tensor
                     if isinstance(key, str) and not key.startswith("tmp_"):
                         try:
                             tensor = _store.get(key)
                             if tensor is not None:
                                 logger.info(
-                                    "EC memcache HIT: mm_hash=%s", key,
+                                    "EC memcache HIT: mm_hash=%s bytes=%d",
+                                    key,
+                                    tensor.nbytes,
                                 )
-                                self[key] = tensor  # backfill local
+                                super().__setitem__(key, tensor)  # backfill
                                 return tensor
                         except Exception as e:
                             logger.warning(
@@ -370,6 +377,10 @@ class NPUModelRunner(GPUModelRunner):
                     return super().get(key, default)
 
             self.encoder_cache = _EcMemcacheDict(_real_dict)
+            logger.info(
+                "EC memcache dict proxy installed: %d local entries",
+                len(_real_dict),
+            )
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
