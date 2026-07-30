@@ -110,5 +110,10 @@ class EcMemcacheBackend:
         """Copy data between local NPU memory and memcache pool.
 
         *direction*: 0 = L2G (local→global), 1 = G2L (global→local).
+
+        Registers the buffer with HYBM before copying so the underlying
+        SMemBm layer knows the memory type of each address.
         """
+        for addr, size in zip(addrs, sizes):
+            self._store.register_buffer(addr, size)
         return self._store.batch_copy(gvas, addrs, sizes, direction)
