@@ -19,6 +19,10 @@
 
 Wraps ``memcache_hybrid.DistributedObjectStore`` directly — no dependency
 on the KV-pool backend module.
+
+Uses ``put_from_layers`` / ``get_into_layers`` APIs (same as the KV-transfer
+backend) so that buffer memory type is auto-detected via
+``SMEMB_COPY_AUTO`` → ``IsInHybmDeviceRange()``.
 """
 
 from __future__ import annotations
@@ -40,9 +44,9 @@ _STORE_INIT_WAIT_S = 0.1
 class EcMemcacheBackend:
     """Lightweight memcache wrapper for embedding storage.
 
-    Only exposes the six methods needed by ``EncoderCacheStore``:
-    ``exists``, ``batch_alloc``, ``batch_get_key_info``, ``batch_add_lease``,
-    ``batch_remove_lease``, and ``batch_copy``.
+    Exposes the four methods needed by ``EncoderCacheStore``:
+    ``exists``, ``batch_get_key_info``, ``put_from_layers``,
+    and ``get_into_layers``.
     """
 
     def __init__(self, local_rank: int):
@@ -80,40 +84,36 @@ class EcMemcacheBackend:
     def exists(self, keys: list[str]) -> list[int]:
         return self._store.batch_is_exist(keys)
 
-    # Match NPU tensor location: on A2 the EC tensor lives in HBM, so
-    # allocate GVA from the HBM pool (media=0).  Using DRAM (media=1,
-    # the C++ default) causes a cross-media mismatch inside HYBM because
-    # the copy direction is inferred from mediaType and must agree with
-    # both the source buffer type and the GVA pool.
-    _ALLOC_MEDIA_HBM = 0
-
-    def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
-        return self._store.batch_alloc(keys, sizes, self._ALLOC_MEDIA_HBM)
-
     def batch_get_key_info(self, keys: list[str]):
         """Returns ``list[KeyInfo]`` — each has ``.size()``, ``.gva_list()``."""
         return self._store.batch_get_key_info(keys)
 
-    def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
-        return self._store.batch_add_lease(keys, lease_ttl_ms)
-
-    def batch_remove_lease(self, keys: list[str]) -> int:
-        return self._store.batch_remove_lease(keys)
-
-    def batch_copy(
+    def put_from_layers(
         self,
-        gvas: list[int],
-        addrs: list[int],
+        key: str,
+        ptrs: list[int],
         sizes: list[int],
         direction: int,
-    ):
-        """Copy data between local NPU memory and memcache pool.
+    ) -> int:
+        """Allocate + copy data into memcache (store).
 
-        *direction*: 0 = L2G (local→global), 1 = G2L (global→local).
-
-        Registers the buffer with HYBM before copying so the underlying
-        SMemBm layer knows the memory type of each address.
+        Uses the same ``put_from_layers`` API as the KV-transfer backend.
+        *direction* should be ``SMEMB_COPY_AUTO`` (9) to auto-detect
+        whether *ptrs* are in HBM or DRAM.
         """
-        for addr, size in zip(addrs, sizes):
-            self._store.register_buffer(addr, size)
-        return self._store.batch_copy(gvas, addrs, sizes, direction)
+        return self._store.put_from_layers(key, ptrs, sizes, direction)
+
+    def get_into_layers(
+        self,
+        key: str,
+        ptrs: list[int],
+        sizes: list[int],
+        direction: int,
+    ) -> int:
+        """Copy data from memcache into pre-allocated buffers (load).
+
+        Uses the same ``get_into_layers`` API as the KV-transfer backend.
+        *direction* should be ``SMEMB_COPY_AUTO`` (9) to auto-detect
+        whether *ptrs* are in HBM or DRAM.
+        """
+        return self._store.get_into_layers(key, ptrs, sizes, direction)

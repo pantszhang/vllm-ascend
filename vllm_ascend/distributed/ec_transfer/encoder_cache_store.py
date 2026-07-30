@@ -29,25 +29,22 @@ from vllm_ascend.distributed.ec_transfer.ec_store_client import (
     get_zmq_rpc_path_ec_lookup,
 )
 
-# Memcache copy direction constants.
-# Must match the GVA allocation pool: batch_alloc(media=HBM) → use L2G/G2L.
-_COPY_L2G = 0  # local HBM → global HBM pool (SMEMB_COPY_L2G)
-_COPY_G2L = 1  # global HBM pool → local HBM (SMEMB_COPY_G2L)
+# SMEMB_COPY_AUTO (9): let HYBM auto-detect buffer memory type via
+# IsInHybmDeviceRange().  This is the only direction that correctly
+# handles NPU tensor addresses without requiring register_buffer.
+_COPY_AUTO = 9
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-# read-configurable TTL for the local gvaBlobTracker lease during batch_copy(G2L)
-LEASE_READ_TTL_MS = 60_000
 
 
 class EncoderCacheStore:
     """Worker-side encoder cache store backed by memcache.
 
-    Provides:
-    - ``put(mm_hash, tensor)``: Store encoder output via GVA + batch_copy(L2G)
-    - ``get(mm_hash) -> Tensor | None``: Load encoder output via GVA + batch_copy(G2L)
-    - ZMQ REP daemon thread for ``exists`` queries from the scheduler
+    Uses ``put_from_layers`` / ``get_into_layers`` APIs (same as the
+    KV-transfer backend) so that buffer memory type is auto-detected
+    (SMEMB_COPY_AUTO → IsInHybmDeviceRange) instead of being inferred
+    from the copy direction.
     """
 
     def __init__(self, vllm_config: "VllmConfig", local_rank: int):
@@ -79,60 +76,55 @@ class EncoderCacheStore:
     def put(self, mm_hash: str, tensor: torch.Tensor) -> None:
         """Store *tensor* as the encoder output for *mm_hash*.
 
-        Allocates a GVA via ``batch_alloc``, then copies NPU → memcache (L2G).
+        Uses ``put_from_layers`` with SMEMB_COPY_AUTO so the memcache
+        layer auto-detects whether the buffer lives in HBM or DRAM.
         """
         key = self._make_key(mm_hash)
-        nbytes = tensor.nbytes
-        try:
-            gva = self._store.batch_alloc([key], [nbytes])[0]
-        except Exception as e:
-            raise RuntimeError(
-                f"EncoderCacheStore.put: batch_alloc failed for key={key}: {e}"
-            ) from e
-        ret = self._store.batch_copy(
-            [gva],
+        ret = self._store.put_from_layers(
+            key,
             [tensor.data_ptr()],
-            [nbytes],
-            _COPY_L2G,
+            [tensor.nbytes],
+            _COPY_AUTO,
         )
         if ret != 0:
             raise RuntimeError(
-                f"EncoderCacheStore.put: batch_copy(L2G, dir={_COPY_L2G}) "
-                f"failed with ret={ret} for key={key} nbytes={nbytes} gva={gva}"
+                f"EncoderCacheStore.put: put_from_layers(AUTO) failed "
+                f"with ret={ret} for key={key} nbytes={tensor.nbytes}"
             )
-        logger.debug("EncoderCacheStore.put: key=%s nbytes=%d gva=%d", key, nbytes, gva)
+        logger.debug(
+            "EncoderCacheStore.put: key=%s nbytes=%d", key, tensor.nbytes
+        )
 
     def get(self, mm_hash: str) -> torch.Tensor | None:
-        """Return the cached encoder output for *mm_hash*, or ``None``."""
+        """Return the cached encoder output for *mm_hash*, or ``None``.
+
+        Looks up the entry size via ``batch_get_key_info``, allocates a
+        destination tensor, then copies via ``get_into_layers`` with
+        SMEMB_COPY_AUTO.
+        """
         key = self._make_key(mm_hash)
 
-        # Look up GVA and byte size from memcache.
-        # batch_get_key_info returns list[KeyInfo]; one element per key.
         key_infos = self._store.batch_get_key_info([key])
         ki = key_infos[0]
         if ki.size() == 0:
             logger.debug("EncoderCacheStore.get: key=%s not found", key)
             return None
-        gva = ki.gva_list()[0]
         nbytes = ki.size()
 
-        # Lease → copy G2L → release lease
-        self._store.batch_add_lease([key], lease_ttl_ms=LEASE_READ_TTL_MS)
         num_tokens = nbytes // self._elem_size // self._hidden_dim
         tensor = torch.empty(
             num_tokens, self._hidden_dim, dtype=self._dtype, device="npu"
         )
-        ret = self._store.batch_copy(
-            [gva],
+        ret = self._store.get_into_layers(
+            key,
             [tensor.data_ptr()],
             [nbytes],
-            _COPY_G2L,
+            _COPY_AUTO,
         )
-        self._store.batch_remove_lease([key])
         if ret != 0:
             raise RuntimeError(
-                f"EncoderCacheStore.get: batch_copy(G2L, dir={_COPY_G2L}) "
-                f"failed with ret={ret} for key={key} nbytes={nbytes} gva={gva}"
+                f"EncoderCacheStore.get: get_into_layers(AUTO) failed "
+                f"with ret={ret} for key={key} nbytes={nbytes}"
             )
         logger.debug(
             "EncoderCacheStore.get: key=%s nbytes=%d num_tokens=%d",
