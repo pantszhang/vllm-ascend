@@ -17,10 +17,12 @@
 
 """Minimal memcache backend for encoder embedding offload.
 
-Mirrors the KV-transfer backend exactly:
-- Uses batch_put_from_layers / batch_get_into_layers (batch APIs)
-- Registers buffers before every operation via register_buffer
-- Uses explicit L2G(0) / G2L(1) directions
+Wraps ``memcache_hybrid.DistributedObjectStore`` directly — no dependency
+on the KV-pool backend module.
+
+Uses batch_put_from_layers / batch_get_into_layers (batch APIs).
+Single-medium config (DRAM only) means direction validation is skipped
+by HYBM, so register_buffer is not needed.
 """
 
 from __future__ import annotations
@@ -51,7 +53,6 @@ class EcMemcacheBackend:
         self._local_rank = local_rank
         self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
         self._store = self._init_store()
-        self._registered: set[int] = set()  # dedup register_buffer calls
 
     def _init_store(self):
         try:
@@ -86,9 +87,6 @@ class EcMemcacheBackend:
         """Store *tensor* under *key* via batch_put_from_layers."""
         addr = tensor.data_ptr()
         nbytes = tensor.nbytes
-
-        self._ensure_registered(addr, nbytes)
-
         results = self._store.batch_put_from_layers(
             [key],
             [[addr]],
@@ -117,10 +115,7 @@ class EcMemcacheBackend:
         tensor = torch.empty(
             num_tokens, hidden_dim, dtype=dtype, device="npu"
         )
-
         addr = tensor.data_ptr()
-        self._ensure_registered(addr, nbytes)
-
         results = self._store.batch_get_into_layers(
             [key],
             [[addr]],
@@ -138,22 +133,3 @@ class EcMemcacheBackend:
             key, nbytes, num_tokens,
         )
         return tensor
-
-    # ---- internal ----
-
-    def _ensure_registered(self, addr: int, size: int) -> None:
-        """Register *addr* with HYBM (idempotent via address set)."""
-        if addr in self._registered:
-            return
-        ret = self._store.register_buffer(addr, size)
-        if ret != 0:
-            logger.warning(
-                "register_buffer failed: ret=%d addr=0x%x size=%d. "
-                "batch_copy directions may mismatch.",
-                ret, addr, size,
-            )
-        else:
-            self._registered.add(addr)
-            logger.info(
-                "register_buffer OK: addr=0x%x size=%d", addr, size,
-            )

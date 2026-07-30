@@ -29,11 +29,6 @@ from vllm_ascend.distributed.ec_transfer.ec_store_client import (
     get_zmq_rpc_path_ec_lookup,
 )
 
-# Match the KV-transfer backend exactly: explicit L2G/G2L directions
-# with batch APIs (batch_put_from_layers / batch_get_into_layers).
-_COPY_L2G = 0  # SMEMB_COPY_L2G: local NPU → memcache
-_COPY_G2L = 1  # SMEMB_COPY_G2L: memcache → local NPU
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
