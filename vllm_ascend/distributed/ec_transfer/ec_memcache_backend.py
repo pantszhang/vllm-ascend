@@ -75,6 +75,9 @@ class EcMemcacheBackend:
         time.sleep(_STORE_INIT_WAIT_S)
         return store
 
+    _COPY_L2G = 0
+    _COPY_G2L = 1
+
     # ---- EncoderCacheStore needs only these ----
 
     def exists(self, keys: list[str]) -> list[int]:
@@ -83,24 +86,24 @@ class EcMemcacheBackend:
     def put(self, keys: list[str], addrs: list[int], sizes: list[int]):
         """Store data from local NPU memory to memcache.
 
-        Uses ``batch_put_from_layers`` which expects nested lists
-        (one inner list per key, for multi-buffer tensors).
-        The *direct* argument uses the default H2G direction.
+        Uses ``batch_put_from_layers`` with nested lists matching the
+        KV transfer backend convention.
         """
         return self._store.batch_put_from_layers(
             keys,
             [[a] for a in addrs],
             [[s] for s in sizes],
+            self._COPY_L2G,
         )
 
     def get(self, keys: list[str], addrs: list[int], sizes: list[int]):
         """Load data from memcache to local NPU memory.
 
-        Uses ``batch_get_into_layers`` — same nested-list convention
-        as the KV transfer backend.
+        Uses ``batch_get_into_layers`` matching the KV transfer backend.
         """
         return self._store.batch_get_into_layers(
             keys,
             [[a] for a in addrs],
             [[s] for s in sizes],
+            self._COPY_G2L,
         )
