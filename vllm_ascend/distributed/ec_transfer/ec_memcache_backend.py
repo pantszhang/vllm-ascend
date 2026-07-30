@@ -88,6 +88,10 @@ class EcMemcacheBackend:
         """Returns ``list[KeyInfo]`` — each has ``.size()``, ``.gva_list()``."""
         return self._store.batch_get_key_info(keys)
 
+    # SMEMB_COPY_AUTO relies on IsInHybmDeviceRange() to detect buffer
+    # media type, but NPU tensor virtual addresses are outside HYBM's
+    # default device range.  Register the buffer first so HYBM knows the
+    # address space, then AUTO detection will correctly return MEDIA_HBM.
     def put_from_layers(
         self,
         key: str,
@@ -95,12 +99,9 @@ class EcMemcacheBackend:
         sizes: list[int],
         direction: int,
     ) -> int:
-        """Allocate + copy data into memcache (store).
-
-        Uses the same ``put_from_layers`` API as the KV-transfer backend.
-        *direction* should be ``SMEMB_COPY_AUTO`` (9) to auto-detect
-        whether *ptrs* are in HBM or DRAM.
-        """
+        """Allocate + copy data into memcache (store)."""
+        for addr, size in zip(ptrs, sizes):
+            self._store.register_buffer(addr, size)
         return self._store.put_from_layers(key, ptrs, sizes, direction)
 
     def get_into_layers(
@@ -110,10 +111,7 @@ class EcMemcacheBackend:
         sizes: list[int],
         direction: int,
     ) -> int:
-        """Copy data from memcache into pre-allocated buffers (load).
-
-        Uses the same ``get_into_layers`` API as the KV-transfer backend.
-        *direction* should be ``SMEMB_COPY_AUTO`` (9) to auto-detect
-        whether *ptrs* are in HBM or DRAM.
-        """
+        """Copy data from memcache into pre-allocated buffers (load)."""
+        for addr, size in zip(ptrs, sizes):
+            self._store.register_buffer(addr, size)
         return self._store.get_into_layers(key, ptrs, sizes, direction)
