@@ -472,6 +472,12 @@ class NPUPlatform(Platform):
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
 
+        from vllm.logger import logger as _platform_logger
+        _platform_logger.info(
+            "platform init: additional_config keys=%s",
+            list(vllm_config.additional_config.keys())
+            if getattr(vllm_config, "additional_config", None) else None,
+        )
         ascend_config = init_ascend_config(vllm_config)
 
         from vllm_ascend.logger import configure_ascend_file_logging
