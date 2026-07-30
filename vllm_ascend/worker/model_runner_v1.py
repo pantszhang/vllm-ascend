@@ -351,6 +351,15 @@ class NPUModelRunner(GPUModelRunner):
 
                 _total_bytes: int = 0
 
+                def _state(self) -> str:
+                    gb = self._total_bytes / (1024 * 1024 * 1024)
+                    max_gb = _max_bytes / (1024 * 1024 * 1024)
+                    return (
+                        f"entries={len(self)} "
+                        f"bytes={self._total_bytes} "
+                        f"GB={gb:.2f}/{max_gb:.2f}"
+                    )
+
                 def __setitem__(self, key, value):
                     # Evict oldest entries until there is room
                     nbytes = value.nbytes if hasattr(value, "nbytes") else 0
@@ -369,8 +378,8 @@ class NPUModelRunner(GPUModelRunner):
                     try:
                         _store.put(key, value)
                         logger.info(
-                            "EC memcache STORE: mm_hash=%s bytes=%d",
-                            key, value.nbytes,
+                            "EC memcache STORE: mm_hash=%s nbytes=%d %s",
+                            key, value.nbytes, self._state(),
                         )
                     except Exception as e:
                         logger.warning(
@@ -392,22 +401,29 @@ class NPUModelRunner(GPUModelRunner):
 
                 def get(self, key, default=None):
                     if key in self:
-                        logger.info("EC cache LOCAL_HIT: mm_hash=%s", key)
+                        logger.info(
+                            "EC cache LOCAL_HIT: mm_hash=%s %s",
+                            key, self._state(),
+                        )
                         return super().get(key, default)
                     if isinstance(key, str) and not key.startswith("tmp_"):
                         try:
                             tensor = _store.get(key)
                             if tensor is not None:
-                                logger.info(
-                                    "EC memcache HIT: mm_hash=%s", key,
-                                )
                                 self._backfill(key, tensor)
+                                logger.info(
+                                    "EC memcache HIT: mm_hash=%s %s",
+                                    key, self._state(),
+                                )
                                 return tensor
                         except Exception as e:
                             logger.warning(
                                 "EC memcache GET failed: %s key=%s", e, key,
                             )
-                    logger.info("EC memcache MISS: mm_hash=%s", key)
+                    logger.info(
+                        "EC memcache MISS: mm_hash=%s %s",
+                        key, self._state(),
+                    )
                     return super().get(key, default)
 
                 def _evict(self, key):
@@ -416,8 +432,8 @@ class NPUModelRunner(GPUModelRunner):
                     self._total_bytes -= nbytes
                     del self[key]
                     logger.info(
-                        "EC cache EVICT: mm_hash=%s nbytes=%d total_bytes=%d/%d",
-                        key, nbytes, self._total_bytes, _max_bytes,
+                        "EC cache EVICT: mm_hash=%s nbytes=%d %s",
+                        key, nbytes, self._state(),
                     )
 
             self.encoder_cache = _EcMemcacheDict(_real_dict)
