@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import TYPE_CHECKING
 
@@ -29,9 +30,15 @@ from vllm_ascend.distributed.ec_transfer.ec_store_client import (
     get_zmq_rpc_path_ec_lookup,
 )
 
-# Memcache copy direction constants
-_COPY_L2G = 0  # local (NPU) → global (memcache pool)
-_COPY_G2L = 1  # global (memcache pool) → local (NPU)
+# Memcache copy direction constants.
+# The HYBM layer may require different direction values than the memcache
+# C enum defaults (e.g. H2G=3 instead of L2G=0 when NPU memory is seen as
+# host memory).  Allow overriding via environment variables set in the launch
+# script:
+#   export EC_MEMCACHE_COPY_L2G=3   # override L2G direction
+#   export EC_MEMCACHE_COPY_G2L=2   # override G2L direction
+_COPY_L2G = int(os.environ.get("EC_MEMCACHE_COPY_L2G", "0"))
+_COPY_G2L = int(os.environ.get("EC_MEMCACHE_COPY_G2L", "1"))
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -67,10 +74,13 @@ class EncoderCacheStore:
         self._zmq_thread = threading.Thread(target=self._zmq_loop, daemon=True)
         self._zmq_thread.start()
         logger.info(
-            "EncoderCacheStore started on %s (model=%s hidden_dim=%d)",
+            "EncoderCacheStore started on %s (model=%s hidden_dim=%d) "
+            "copy_dir: L2G=%d G2L=%d",
             socket_path,
             self._model_name,
             self._hidden_dim,
+            _COPY_L2G,
+            _COPY_G2L,
         )
 
     # ---- NPUModelRunner calls ----
@@ -82,13 +92,23 @@ class EncoderCacheStore:
         """
         key = self._make_key(mm_hash)
         nbytes = tensor.nbytes
-        gva = self._store.batch_alloc([key], [nbytes])[0]
-        self._store.batch_copy(
+        try:
+            gva = self._store.batch_alloc([key], [nbytes])[0]
+        except Exception as e:
+            raise RuntimeError(
+                f"EncoderCacheStore.put: batch_alloc failed for key={key}: {e}"
+            ) from e
+        ret = self._store.batch_copy(
             [gva],
             [tensor.data_ptr()],
             [nbytes],
             _COPY_L2G,
         )
+        if ret != 0:
+            raise RuntimeError(
+                f"EncoderCacheStore.put: batch_copy(L2G, dir={_COPY_L2G}) "
+                f"failed with ret={ret} for key={key} nbytes={nbytes} gva={gva}"
+            )
         logger.debug("EncoderCacheStore.put: key=%s nbytes=%d gva=%d", key, nbytes, gva)
 
     def get(self, mm_hash: str) -> torch.Tensor | None:
@@ -111,13 +131,18 @@ class EncoderCacheStore:
         tensor = torch.empty(
             num_tokens, self._hidden_dim, dtype=self._dtype, device="npu"
         )
-        self._store.batch_copy(
+        ret = self._store.batch_copy(
             [gva],
             [tensor.data_ptr()],
             [nbytes],
             _COPY_G2L,
         )
         self._store.batch_remove_lease([key])
+        if ret != 0:
+            raise RuntimeError(
+                f"EncoderCacheStore.get: batch_copy(G2L, dir={_COPY_G2L}) "
+                f"failed with ret={ret} for key={key} nbytes={nbytes} gva={gva}"
+            )
         logger.debug(
             "EncoderCacheStore.get: key=%s nbytes=%d num_tokens=%d",
             key,
