@@ -31,8 +31,10 @@ class ECMemcacheConfig:
     in the vLLM config.
     """
 
-    def __init__(self, enabled: bool = False, **kwargs):
+    def __init__(self, enabled: bool = False, local_cache_hbm_gb: float = 2.0,
+                 **kwargs):
         self.enabled = enabled
+        self.local_cache_hbm_gb = local_cache_hbm_gb
 
 
 class AscendConfig:

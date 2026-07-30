@@ -326,18 +326,42 @@ class NPUModelRunner(GPUModelRunner):
             self.encoder_cache_store = EncoderCacheStore(
                 vllm_config, get_world_group().local_rank
             )
-            # Wrap encoder_cache dict with a proxy that mirrors all
-            # writes to memcache and checks memcache on cache misses.
-            # v0.23.0 reads/writes the dict directly (no override
-            # methods), so this is the only way to intercept the ops.
+            # Bounded HBM cache: when total tensor bytes exceed the limit,
+            # evict oldest entries (LRU).  Dict misses then fall through
+            # to memcache so offload reads actually happen.
             _store = self.encoder_cache_store
             _real_dict = self.encoder_cache
+            _max_bytes = int(
+                ascend_config.ec_memcache_config.local_cache_hbm_gb
+                * 1024 * 1024 * 1024
+            )
 
             class _EcMemcacheDict(dict):
+                """LRU dict bounded by total tensor bytes in HBM.
+
+                - __setitem__ stores locally + mirrors to memcache.
+                  Evicts oldest entries when total exceeds _max_bytes.
+                - get() returns local hit if present, otherwise queries
+                  memcache and backfills on success.
+                """
+
+                _total_bytes: int = 0
+
                 def __setitem__(self, key, value):
+                    # Evict oldest entries until there is room
+                    nbytes = value.nbytes if hasattr(value, "nbytes") else 0
+                    while (
+                        len(self) > 0
+                        and self._total_bytes + nbytes > _max_bytes
+                    ):
+                        evicted_key = next(iter(self))
+                        self._evict(evicted_key)
+
                     super().__setitem__(key, value)
+                    self._total_bytes += nbytes
+
                     if not isinstance(key, str) or key.startswith("tmp_"):
-                        return  # skip profile_run temp keys
+                        return
                     try:
                         _store.put(key, value)
                         logger.info(
@@ -348,6 +372,19 @@ class NPUModelRunner(GPUModelRunner):
                         logger.warning(
                             "EC memcache STORE failed: %s key=%s", e, key,
                         )
+
+                def _backfill(self, key, tensor):
+                    """Put *tensor* into local cache without mirroring to
+                    memcache (it already came from there)."""
+                    nbytes = tensor.nbytes if hasattr(tensor, "nbytes") else 0
+                    while (
+                        len(self) > 0
+                        and self._total_bytes + nbytes > _max_bytes
+                    ):
+                        evicted_key = next(iter(self))
+                        self._evict(evicted_key)
+                    super().__setitem__(key, tensor)
+                    self._total_bytes += nbytes
 
                 def get(self, key, default=None):
                     if key in self:
@@ -360,7 +397,7 @@ class NPUModelRunner(GPUModelRunner):
                                 logger.info(
                                     "EC memcache HIT: mm_hash=%s", key,
                                 )
-                                self[key] = tensor  # backfill local
+                                self._backfill(key, tensor)
                                 return tensor
                         except Exception as e:
                             logger.warning(
@@ -368,6 +405,16 @@ class NPUModelRunner(GPUModelRunner):
                             )
                     logger.info("EC memcache MISS: mm_hash=%s", key)
                     return super().get(key, default)
+
+                def _evict(self, key):
+                    tensor = super().get(key)
+                    if tensor is not None and hasattr(tensor, "nbytes"):
+                        self._total_bytes -= tensor.nbytes
+                    del self[key]
+                    logger.debug(
+                        "EC cache EVICT: mm_hash=%s total_bytes=%d",
+                        key, self._total_bytes,
+                    )
 
             self.encoder_cache = _EcMemcacheDict(_real_dict)
 
