@@ -29,10 +29,13 @@ from vllm_ascend.distributed.ec_transfer.ec_store_client import (
     get_zmq_rpc_path_ec_lookup,
 )
 
-# SMEMB_COPY_AUTO (9): let HYBM auto-detect buffer memory type via
-# IsInHybmDeviceRange().  This is the only direction that correctly
-# handles NPU tensor addresses without requiring register_buffer.
-_COPY_AUTO = 9
+# Match the KV-transfer backend: explicitly set buffer type via
+# SMEMB_COPY_L2G (0) / SMEMB_COPY_G2L (1).  AUTO (9) relies on
+# IsInHybmDeviceRange() which returns false for NPU tensor virtual
+# addresses.  register_buffer() tells HYBM about the address range
+# so that the explicit L2G/G2L directions work correctly.
+_COPY_L2G = 0  # local NPU → memcache
+_COPY_G2L = 1  # memcache → local NPU
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -76,19 +79,19 @@ class EncoderCacheStore:
     def put(self, mm_hash: str, tensor: torch.Tensor) -> None:
         """Store *tensor* as the encoder output for *mm_hash*.
 
-        Uses ``put_from_layers`` with SMEMB_COPY_AUTO so the memcache
-        layer auto-detects whether the buffer lives in HBM or DRAM.
+        Uses ``put_from_layers`` with SMEMB_COPY_L2G so the buffer type
+        is explicitly set to HBM (matching the NPU tensor location).
         """
         key = self._make_key(mm_hash)
         ret = self._store.put_from_layers(
             key,
             [tensor.data_ptr()],
             [tensor.nbytes],
-            _COPY_AUTO,
+            _COPY_L2G,
         )
         if ret != 0:
             raise RuntimeError(
-                f"EncoderCacheStore.put: put_from_layers(AUTO) failed "
+                f"EncoderCacheStore.put: put_from_layers(L2G) failed "
                 f"with ret={ret} for key={key} nbytes={tensor.nbytes}"
             )
         logger.debug(
@@ -119,11 +122,11 @@ class EncoderCacheStore:
             key,
             [tensor.data_ptr()],
             [nbytes],
-            _COPY_AUTO,
+            _COPY_G2L,
         )
         if ret != 0:
             raise RuntimeError(
-                f"EncoderCacheStore.get: get_into_layers(AUTO) failed "
+                f"EncoderCacheStore.get: get_into_layers(G2L) failed "
                 f"with ret={ret} for key={key} nbytes={nbytes}"
             )
         logger.debug(
