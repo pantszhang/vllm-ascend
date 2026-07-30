@@ -75,33 +75,24 @@ class EcMemcacheBackend:
         time.sleep(_STORE_INIT_WAIT_S)
         return store
 
+    _COPY_L2G = 0
+    _COPY_G2L = 1
+
     # ---- EncoderCacheStore needs only these ----
 
     def exists(self, keys: list[str]) -> list[int]:
         return self._store.batch_is_exist(keys)
 
-    def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
-        return self._store.batch_alloc(keys, sizes)
+    def put(self, keys: list[str], addrs: list[int], sizes: list[int]):
+        """Store data from local NPU memory to memcache.
 
-    def batch_get_key_info(self, keys: list[str]):
-        """Returns ``list[KeyInfo]`` — each has ``.size()``, ``.gva_list()``."""
-        return self._store.batch_get_key_info(keys)
-
-    def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
-        return self._store.batch_add_lease(keys, lease_ttl_ms)
-
-    def batch_remove_lease(self, keys: list[str]) -> int:
-        return self._store.batch_remove_lease(keys)
-
-    def batch_copy(
-        self,
-        gvas: list[int],
-        addrs: list[int],
-        sizes: list[int],
-        direction: int,
-    ):
-        """Copy data between local NPU memory and memcache pool.
-
-        *direction*: 0 = L2G (local→global), 1 = G2L (global→local).
+        Uses the layered API that works with all protocols (host_shm, sdma, rdma).
         """
-        return self._store.batch_copy(gvas, addrs, sizes, direction)
+        return self._store.batch_put_from_layers(keys, addrs, sizes, self._COPY_L2G)
+
+    def get(self, keys: list[str], addrs: list[int], sizes: list[int]):
+        """Load data from memcache to local NPU memory.
+
+        Uses the layered API that works with all protocols (host_shm, sdma, rdma).
+        """
+        return self._store.batch_get_into_layers(keys, addrs, sizes, self._COPY_G2L)

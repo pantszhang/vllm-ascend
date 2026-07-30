@@ -29,15 +29,8 @@ from vllm_ascend.distributed.ec_transfer.ec_store_client import (
     get_zmq_rpc_path_ec_lookup,
 )
 
-# Memcache copy direction constants
-_COPY_L2G = 0  # local (NPU) → global (memcache pool)
-_COPY_G2L = 1  # global (memcache pool) → local (NPU)
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-# read-configurable TTL for the local gvaBlobTracker lease during batch_copy(G2L)
-LEASE_READ_TTL_MS = 60_000
 
 
 class EncoderCacheStore:
@@ -78,46 +71,42 @@ class EncoderCacheStore:
     def put(self, mm_hash: str, tensor: torch.Tensor) -> None:
         """Store *tensor* as the encoder output for *mm_hash*.
 
-        Allocates a GVA via ``batch_alloc``, then copies NPU → memcache (L2G).
+        Uses ``batch_put_from_layers`` which works with all protocols
+        (host_shm, device_sdma, device_rdma).
         """
         key = self._make_key(mm_hash)
         nbytes = tensor.nbytes
-        gva = self._store.batch_alloc([key], [nbytes])[0]
-        self._store.batch_copy(
-            [gva],
-            [tensor.data_ptr()],
-            [nbytes],
-            _COPY_L2G,
-        )
-        logger.debug("EncoderCacheStore.put: key=%s nbytes=%d gva=%d", key, nbytes, gva)
+        self._store.put([key], [tensor.data_ptr()], [nbytes])
+        logger.debug("EncoderCacheStore.put: key=%s nbytes=%d", key, nbytes)
 
     def get(self, mm_hash: str) -> torch.Tensor | None:
-        """Return the cached encoder output for *mm_hash*, or ``None``."""
+        """Return the cached encoder output for *mm_hash*, or ``None``.
+
+        Uses ``batch_get_into_layers`` which works with all protocols
+        (host_shm, device_sdma, device_rdma).
+        """
         key = self._make_key(mm_hash)
 
-        # Look up GVA and byte size from memcache.
-        # batch_get_key_info returns list[KeyInfo]; one element per key.
-        key_infos = self._store.batch_get_key_info([key])
-        ki = key_infos[0]
-        if ki.size() == 0:
+        # Check existence first (lightweight, no data transfer)
+        if self._store.exists([key])[0] != 1:
             logger.debug("EncoderCacheStore.get: key=%s not found", key)
             return None
-        gva = ki.gva_list()[0]
-        nbytes = ki.size()
 
-        # Lease → copy G2L → release lease
-        self._store.batch_add_lease([key], lease_ttl_ms=LEASE_READ_TTL_MS)
+        # Need size info for tensor allocation
+        key_infos = self._store.batch_get_key_info([key])
+        if hasattr(key_infos, "__iter__"):
+            key_infos = list(key_infos)
+        ki = key_infos[0]
+        nbytes = ki.size()
+        if nbytes == 0:
+            logger.debug("EncoderCacheStore.get: key=%s has zero size", key)
+            return None
+
         num_tokens = nbytes // self._elem_size // self._hidden_dim
         tensor = torch.empty(
             num_tokens, self._hidden_dim, dtype=self._dtype, device="npu"
         )
-        self._store.batch_copy(
-            [gva],
-            [tensor.data_ptr()],
-            [nbytes],
-            _COPY_G2L,
-        )
-        self._store.batch_remove_lease([key])
+        self._store.get([key], [tensor.data_ptr()], [nbytes])
         logger.debug(
             "EncoderCacheStore.get: key=%s nbytes=%d num_tokens=%d",
             key,
