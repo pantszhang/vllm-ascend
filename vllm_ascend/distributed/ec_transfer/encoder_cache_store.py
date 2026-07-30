@@ -29,13 +29,10 @@ from vllm_ascend.distributed.ec_transfer.ec_store_client import (
     get_zmq_rpc_path_ec_lookup,
 )
 
-# Match the KV-transfer backend: explicitly set buffer type via
-# SMEMB_COPY_L2G (0) / SMEMB_COPY_G2L (1).  AUTO (9) relies on
-# IsInHybmDeviceRange() which returns false for NPU tensor virtual
-# addresses.  register_buffer() tells HYBM about the address range
-# so that the explicit L2G/G2L directions work correctly.
-_COPY_L2G = 0  # local NPU → memcache
-_COPY_G2L = 1  # memcache → local NPU
+# Match the KV-transfer backend exactly: explicit L2G/G2L directions
+# with batch APIs (batch_put_from_layers / batch_get_into_layers).
+_COPY_L2G = 0  # SMEMB_COPY_L2G: local NPU → memcache
+_COPY_G2L = 1  # SMEMB_COPY_G2L: memcache → local NPU
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -44,10 +41,9 @@ if TYPE_CHECKING:
 class EncoderCacheStore:
     """Worker-side encoder cache store backed by memcache.
 
-    Uses ``put_from_layers`` / ``get_into_layers`` APIs (same as the
-    KV-transfer backend) with explicit L2G(0) / G2L(1) directions.
-    Buffers are registered before each call so HYBM recognizes the
-    NPU virtual address space.
+    Mirrors the KV-transfer backend: registers buffers with HYBM before
+    every operation, then uses batch_put_from_layers / batch_get_into_layers
+    with explicit L2G/G2L directions.
     """
 
     def __init__(self, vllm_config: "VllmConfig", local_rank: int):
@@ -77,65 +73,14 @@ class EncoderCacheStore:
     # ---- NPUModelRunner calls ----
 
     def put(self, mm_hash: str, tensor: torch.Tensor) -> None:
-        """Store *tensor* as the encoder output for *mm_hash*.
-
-        Uses ``put_from_layers`` with SMEMB_COPY_L2G so the buffer type
-        is explicitly set to HBM (matching the NPU tensor location).
-        """
+        """Store *tensor* as the encoder output for *mm_hash*."""
         key = self._make_key(mm_hash)
-        ret = self._store.put_from_layers(
-            key,
-            [tensor.data_ptr()],
-            [tensor.nbytes],
-            _COPY_L2G,
-        )
-        if ret != 0:
-            raise RuntimeError(
-                f"EncoderCacheStore.put: put_from_layers(L2G) failed "
-                f"with ret={ret} for key={key} nbytes={tensor.nbytes}"
-            )
-        logger.debug(
-            "EncoderCacheStore.put: key=%s nbytes=%d", key, tensor.nbytes
-        )
+        self._store.put(key, tensor)
 
     def get(self, mm_hash: str) -> torch.Tensor | None:
-        """Return the cached encoder output for *mm_hash*, or ``None``.
-
-        Looks up the entry size via ``batch_get_key_info``, allocates a
-        destination tensor, then copies via ``get_into_layers`` with
-        G2L direction.
-        """
+        """Return the cached encoder output for *mm_hash*, or ``None``."""
         key = self._make_key(mm_hash)
-
-        key_infos = self._store.batch_get_key_info([key])
-        ki = key_infos[0]
-        if ki.size() == 0:
-            logger.debug("EncoderCacheStore.get: key=%s not found", key)
-            return None
-        nbytes = ki.size()
-
-        num_tokens = nbytes // self._elem_size // self._hidden_dim
-        tensor = torch.empty(
-            num_tokens, self._hidden_dim, dtype=self._dtype, device="npu"
-        )
-        ret = self._store.get_into_layers(
-            key,
-            [tensor.data_ptr()],
-            [nbytes],
-            _COPY_G2L,
-        )
-        if ret != 0:
-            raise RuntimeError(
-                f"EncoderCacheStore.get: get_into_layers(G2L) failed "
-                f"with ret={ret} for key={key} nbytes={nbytes}"
-            )
-        logger.debug(
-            "EncoderCacheStore.get: key=%s nbytes=%d num_tokens=%d",
-            key,
-            nbytes,
-            num_tokens,
-        )
-        return tensor
+        return self._store.get(key, self._elem_size, self._hidden_dim, self._dtype)
 
     # ---- ZMQ server ----
 

@@ -17,12 +17,10 @@
 
 """Minimal memcache backend for encoder embedding offload.
 
-Wraps ``memcache_hybrid.DistributedObjectStore`` directly — no dependency
-on the KV-pool backend module.
-
-Uses ``put_from_layers`` / ``get_into_layers`` APIs (same as the KV-transfer
-backend).  Buffers are registered before each call so HYBM recognizes the
-NPU address space; direction is explicitly L2G(0) / G2L(1).
+Mirrors the KV-transfer backend exactly:
+- Uses batch_put_from_layers / batch_get_into_layers (batch APIs)
+- Registers buffers before every operation via register_buffer
+- Uses explicit L2G(0) / G2L(1) directions
 """
 
 from __future__ import annotations
@@ -37,22 +35,23 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 logger = init_logger(__name__)
 
-# Wait for memcache internal threads after store init (same as KV pool backend)
 _STORE_INIT_WAIT_S = 0.1
+
+_COPY_L2G = 0  # SMEMB_COPY_L2G
+_COPY_G2L = 1  # SMEMB_COPY_G2L
 
 
 class EcMemcacheBackend:
     """Lightweight memcache wrapper for embedding storage.
 
-    Exposes the four methods needed by ``EncoderCacheStore``:
-    ``exists``, ``batch_get_key_info``, ``put_from_layers``,
-    and ``get_into_layers``.
+    Exposes three methods: ``exists``, ``put``, and ``get``.
     """
 
     def __init__(self, local_rank: int):
         self._local_rank = local_rank
         self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
         self._store = self._init_store()
+        self._registered: set[int] = set()  # dedup register_buffer calls
 
     def _init_store(self):
         try:
@@ -63,7 +62,6 @@ class EcMemcacheBackend:
                 "See https://gitee.com/ascend/memfabric_hybrid"
             ) from e
 
-        # A2 devices need an all_gather warmup before store init
         if self._is_a2:
             tmp = torch.zeros(1, device="npu")
             out = [torch.empty_like(tmp) for _ in range(torch.distributed.get_world_size())]
@@ -79,38 +77,83 @@ class EcMemcacheBackend:
         time.sleep(_STORE_INIT_WAIT_S)
         return store
 
-    # ---- EncoderCacheStore needs only these ----
+    # ---- public API ----
 
     def exists(self, keys: list[str]) -> list[int]:
         return self._store.batch_is_exist(keys)
 
-    def batch_get_key_info(self, keys: list[str]):
-        """Returns ``list[KeyInfo]`` — each has ``.size()``, ``.gva_list()``."""
-        return self._store.batch_get_key_info(keys)
+    def put(self, key: str, tensor: torch.Tensor) -> None:
+        """Store *tensor* under *key* via batch_put_from_layers."""
+        addr = tensor.data_ptr()
+        nbytes = tensor.nbytes
 
-    # Register buffers before put/get so HYBM's SmemBm layer knows the
-    # NPU virtual address range; the explicit L2G/G2L direction then
-    # tells it to treat these as HBM.
-    def put_from_layers(
-        self,
-        key: str,
-        ptrs: list[int],
-        sizes: list[int],
-        direction: int,
-    ) -> int:
-        """Allocate + copy data into memcache (store)."""
-        for addr, size in zip(ptrs, sizes):
-            self._store.register_buffer(addr, size)
-        return self._store.put_from_layers(key, ptrs, sizes, direction)
+        self._ensure_registered(addr, nbytes)
 
-    def get_into_layers(
-        self,
-        key: str,
-        ptrs: list[int],
-        sizes: list[int],
-        direction: int,
-    ) -> int:
-        """Copy data from memcache into pre-allocated buffers (load)."""
-        for addr, size in zip(ptrs, sizes):
-            self._store.register_buffer(addr, size)
-        return self._store.get_into_layers(key, ptrs, sizes, direction)
+        results = self._store.batch_put_from_layers(
+            [key],
+            [[addr]],
+            [[nbytes]],
+            _COPY_L2G,
+        )
+        ret = results[0] if results else -1
+        if ret != 0:
+            raise RuntimeError(
+                f"EcMemcacheBackend.put: batch_put_from_layers(L2G) failed "
+                f"ret={ret} key={key} addr=0x{addr:x} nbytes={nbytes}"
+            )
+        logger.debug("EcMemcacheBackend.put: key=%s nbytes=%d", key, nbytes)
+
+    def get(
+        self, key: str, elem_size: int, hidden_dim: int, dtype: torch.dtype
+    ) -> torch.Tensor | None:
+        """Load data for *key* via batch_get_key_info + batch_get_into_layers."""
+        key_infos = self._store.batch_get_key_info([key])
+        ki = key_infos[0]
+        if ki.size() == 0:
+            logger.debug("EcMemcacheBackend.get: key=%s not found", key)
+            return None
+        nbytes = ki.size()
+        num_tokens = nbytes // elem_size // hidden_dim
+        tensor = torch.empty(
+            num_tokens, hidden_dim, dtype=dtype, device="npu"
+        )
+
+        addr = tensor.data_ptr()
+        self._ensure_registered(addr, nbytes)
+
+        results = self._store.batch_get_into_layers(
+            [key],
+            [[addr]],
+            [[nbytes]],
+            _COPY_G2L,
+        )
+        ret = results[0] if results else -1
+        if ret != 0:
+            raise RuntimeError(
+                f"EcMemcacheBackend.get: batch_get_into_layers(G2L) failed "
+                f"ret={ret} key={key} addr=0x{addr:x} nbytes={nbytes}"
+            )
+        logger.debug(
+            "EcMemcacheBackend.get: key=%s nbytes=%d num_tokens=%d",
+            key, nbytes, num_tokens,
+        )
+        return tensor
+
+    # ---- internal ----
+
+    def _ensure_registered(self, addr: int, size: int) -> None:
+        """Register *addr* with HYBM (idempotent via address set)."""
+        if addr in self._registered:
+            return
+        ret = self._store.register_buffer(addr, size)
+        if ret != 0:
+            logger.warning(
+                "register_buffer failed: ret=%d addr=0x%x size=%d. "
+                "batch_copy directions may mismatch.",
+                ret, addr, size,
+            )
+        else:
+            self._registered.add(addr)
+            logger.info(
+                "register_buffer OK: addr=0x%x size=%d", addr, size,
+            )
