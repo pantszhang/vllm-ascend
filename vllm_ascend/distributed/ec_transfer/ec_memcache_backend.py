@@ -21,8 +21,8 @@ Wraps ``memcache_hybrid.DistributedObjectStore`` directly — no dependency
 on the KV-pool backend module.
 
 Uses ``put_from_layers`` / ``get_into_layers`` APIs (same as the KV-transfer
-backend) so that buffer memory type is auto-detected via
-``SMEMB_COPY_AUTO`` → ``IsInHybmDeviceRange()``.
+backend).  Buffers are registered before each call so HYBM recognizes the
+NPU address space; direction is explicitly L2G(0) / G2L(1).
 """
 
 from __future__ import annotations
@@ -88,10 +88,9 @@ class EcMemcacheBackend:
         """Returns ``list[KeyInfo]`` — each has ``.size()``, ``.gva_list()``."""
         return self._store.batch_get_key_info(keys)
 
-    # SMEMB_COPY_AUTO relies on IsInHybmDeviceRange() to detect buffer
-    # media type, but NPU tensor virtual addresses are outside HYBM's
-    # default device range.  Register the buffer first so HYBM knows the
-    # address space, then AUTO detection will correctly return MEDIA_HBM.
+    # Register buffers before put/get so HYBM's SmemBm layer knows the
+    # NPU virtual address range; the explicit L2G/G2L direction then
+    # tells it to treat these as HBM.
     def put_from_layers(
         self,
         key: str,

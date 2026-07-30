@@ -45,9 +45,9 @@ class EncoderCacheStore:
     """Worker-side encoder cache store backed by memcache.
 
     Uses ``put_from_layers`` / ``get_into_layers`` APIs (same as the
-    KV-transfer backend) so that buffer memory type is auto-detected
-    (SMEMB_COPY_AUTO → IsInHybmDeviceRange) instead of being inferred
-    from the copy direction.
+    KV-transfer backend) with explicit L2G(0) / G2L(1) directions.
+    Buffers are registered before each call so HYBM recognizes the
+    NPU virtual address space.
     """
 
     def __init__(self, vllm_config: "VllmConfig", local_rank: int):
@@ -103,7 +103,7 @@ class EncoderCacheStore:
 
         Looks up the entry size via ``batch_get_key_info``, allocates a
         destination tensor, then copies via ``get_into_layers`` with
-        SMEMB_COPY_AUTO.
+        G2L direction.
         """
         key = self._make_key(mm_hash)
 
