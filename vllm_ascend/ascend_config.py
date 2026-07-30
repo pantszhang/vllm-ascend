@@ -65,6 +65,11 @@ class AscendConfig:
 
         ec_memcache_config = additional_config.get("ec_memcache_config", {})
         self.ec_memcache_config = ECMemcacheConfig(**ec_memcache_config)
+        logger.info(
+            "EC memcache config parsed: additional_config keys=%s ec_memcache_config=%s",
+            list(additional_config.keys()) if additional_config else [],
+            ec_memcache_config,
+        )
 
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
         self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
