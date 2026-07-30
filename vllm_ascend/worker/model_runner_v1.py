@@ -332,7 +332,11 @@ class NPUModelRunner(GPUModelRunner):
             _store = self.encoder_cache_store
             _real_dict = self.encoder_cache
             _max_bytes = int(
-                ascend_config.ec_memcache_config.local_cache_hbm_gb
+                getattr(
+                    ascend_config.ec_memcache_config,
+                    "local_cache_hbm_gb",
+                    2.0,  # default 2 GB if config predates the field
+                )
                 * 1024 * 1024 * 1024
             )
 
