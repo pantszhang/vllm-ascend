@@ -80,8 +80,15 @@ class EcMemcacheBackend:
     def exists(self, keys: list[str]) -> list[int]:
         return self._store.batch_is_exist(keys)
 
+    # Match NPU tensor location: on A2 the EC tensor lives in HBM, so
+    # allocate GVA from the HBM pool (media=0).  Using DRAM (media=1,
+    # the C++ default) causes a cross-media mismatch inside HYBM because
+    # the copy direction is inferred from mediaType and must agree with
+    # both the source buffer type and the GVA pool.
+    _ALLOC_MEDIA_HBM = 0
+
     def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
-        return self._store.batch_alloc(keys, sizes)
+        return self._store.batch_alloc(keys, sizes, self._ALLOC_MEDIA_HBM)
 
     def batch_get_key_info(self, keys: list[str]):
         """Returns ``list[KeyInfo]`` — each has ``.size()``, ``.gva_list()``."""

@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import os
 import threading
 from typing import TYPE_CHECKING
 
@@ -31,14 +30,9 @@ from vllm_ascend.distributed.ec_transfer.ec_store_client import (
 )
 
 # Memcache copy direction constants.
-# The HYBM layer may require different direction values than the memcache
-# C enum defaults (e.g. H2G=3 instead of L2G=0 when NPU memory is seen as
-# host memory).  Allow overriding via environment variables set in the launch
-# script:
-#   export EC_MEMCACHE_COPY_L2G=3   # override L2G direction
-#   export EC_MEMCACHE_COPY_G2L=2   # override G2L direction
-_COPY_L2G = int(os.environ.get("EC_MEMCACHE_COPY_L2G", "0"))
-_COPY_G2L = int(os.environ.get("EC_MEMCACHE_COPY_G2L", "1"))
+# Must match the GVA allocation pool: batch_alloc(media=HBM) → use L2G/G2L.
+_COPY_L2G = 0  # local HBM → global HBM pool (SMEMB_COPY_L2G)
+_COPY_G2L = 1  # global HBM pool → local HBM (SMEMB_COPY_G2L)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -74,13 +68,10 @@ class EncoderCacheStore:
         self._zmq_thread = threading.Thread(target=self._zmq_loop, daemon=True)
         self._zmq_thread.start()
         logger.info(
-            "EncoderCacheStore started on %s (model=%s hidden_dim=%d) "
-            "copy_dir: L2G=%d G2L=%d",
+            "EncoderCacheStore started on %s (model=%s hidden_dim=%d)",
             socket_path,
             self._model_name,
             self._hidden_dim,
-            _COPY_L2G,
-            _COPY_G2L,
         )
 
     # ---- NPUModelRunner calls ----
