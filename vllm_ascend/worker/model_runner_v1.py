@@ -335,7 +335,7 @@ class NPUModelRunner(GPUModelRunner):
                 getattr(
                     ascend_config.ec_memcache_config,
                     "local_cache_hbm_gb",
-                    2.0,  # default 2 GB if config predates the field
+                    0.5,  # default 0.5 GB if config predates the field
                 )
                 * 1024 * 1024 * 1024
             )
