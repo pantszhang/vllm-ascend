@@ -408,12 +408,12 @@ class NPUModelRunner(GPUModelRunner):
 
                 def _evict(self, key):
                     tensor = super().get(key)
-                    if tensor is not None and hasattr(tensor, "nbytes"):
-                        self._total_bytes -= tensor.nbytes
+                    nbytes = tensor.nbytes if tensor is not None and hasattr(tensor, "nbytes") else 0
+                    self._total_bytes -= nbytes
                     del self[key]
-                    logger.debug(
-                        "EC cache EVICT: mm_hash=%s total_bytes=%d",
-                        key, self._total_bytes,
+                    logger.info(
+                        "EC cache EVICT: mm_hash=%s nbytes=%d total_bytes=%d/%d",
+                        key, nbytes, self._total_bytes, _max_bytes,
                     )
 
             self.encoder_cache = _EcMemcacheDict(_real_dict)
