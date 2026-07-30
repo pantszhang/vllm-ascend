@@ -23,6 +23,7 @@ on the KV-pool backend module.
 
 from __future__ import annotations
 
+import os
 import time
 
 import torch
@@ -75,8 +76,10 @@ class EcMemcacheBackend:
         time.sleep(_STORE_INIT_WAIT_S)
         return store
 
-    _COPY_L2G = 0
-    _COPY_G2L = 1
+    # Direction values: host_shm=0/1, sdma=3/2, rdma varies.
+    # Override via env: EC_MEMCACHE_COPY_L2G / EC_MEMCACHE_COPY_G2L
+    _COPY_L2G = int(os.environ.get("EC_MEMCACHE_COPY_L2G", "3"))
+    _COPY_G2L = int(os.environ.get("EC_MEMCACHE_COPY_G2L", "2"))
 
     # ---- EncoderCacheStore needs only these ----
 
@@ -86,24 +89,21 @@ class EcMemcacheBackend:
     def put(self, keys: list[str], addrs: list[int], sizes: list[int]):
         """Store data from local NPU memory to memcache.
 
-        Uses ``batch_put_from_layers`` with nested lists matching the
-        KV transfer backend convention.
+        Uses batch_alloc + batch_copy. Direction via env
+        ``EC_MEMCACHE_COPY_L2G`` (default 3 for SDMA; set 0 for host_shm).
         """
-        return self._store.batch_put_from_layers(
-            keys,
-            [[a] for a in addrs],
-            [[s] for s in sizes],
-            self._COPY_L2G,
-        )
+        gvas = self._store.batch_alloc(keys, sizes)
+        return self._store.batch_copy(gvas, addrs, sizes, self._COPY_L2G)
 
     def get(self, keys: list[str], addrs: list[int], sizes: list[int]):
         """Load data from memcache to local NPU memory.
 
-        Uses ``batch_get_into_layers`` matching the KV transfer backend.
+        Direction via env ``EC_MEMCACHE_COPY_G2L`` (default 2 for SDMA;
+        set 1 for host_shm).
         """
-        return self._store.batch_get_into_layers(
-            keys,
-            [[a] for a in addrs],
-            [[s] for s in sizes],
-            self._COPY_G2L,
-        )
+        key_infos = self._store.batch_get_key_info(keys)
+        gvas = [ki.gva_list()[0] for ki in key_infos]
+        self._store.batch_add_lease(keys)
+        res = self._store.batch_copy(gvas, addrs, sizes, self._COPY_G2L)
+        self._store.batch_remove_lease(keys)
+        return res
