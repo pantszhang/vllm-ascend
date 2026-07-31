@@ -32,10 +32,8 @@ import time
 import torch
 import torch.distributed
 from vllm.distributed.parallel_state import get_world_group
-from vllm.logger import init_logger
+from vllm.logger import logger  # use root logger for INFO visibility
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-logger = init_logger(__name__)
 
 _STORE_INIT_WAIT_S = 0.1
 
