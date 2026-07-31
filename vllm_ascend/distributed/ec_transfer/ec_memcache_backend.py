@@ -65,6 +65,7 @@ class EcMemcacheBackend:
         self._store = self._init_store()
         # statistics
         self._cnt_stores: int = 0
+        self._cnt_gets: int = 0
         self._cnt_hits: dict[str, int] = {"HBM": 0, "DRAM": 0, "SSD": 0}
         self._cnt_misses: int = 0
 
@@ -121,6 +122,7 @@ class EcMemcacheBackend:
         self, key: str, elem_size: int, hidden_dim: int, dtype: torch.dtype
     ) -> torch.Tensor | None:
         """Load data for *key* via batch_get_key_info + batch_get_into_layers."""
+        self._cnt_gets += 1
         key_infos = self._store.batch_get_key_info([key])
         ki = key_infos[0]
         if ki.size() == 0:
@@ -155,7 +157,8 @@ class EcMemcacheBackend:
 
     def _stats(self) -> str:
         return (
-            f"[stores={self._cnt_stores} "
+            f"[gets={self._cnt_gets} "
+            f"stores={self._cnt_stores} "
             f"hits={sum(self._cnt_hits.values())} "
             f"hbm_hits={self._cnt_hits.get('HBM',0)} "
             f"dram_hits={self._cnt_hits.get('DRAM',0)} "
