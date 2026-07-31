@@ -101,6 +101,7 @@ class EcMemcacheBackend:
 
     def put(self, key: str, tensor: torch.Tensor) -> None:
         """Store *tensor* under *key* via batch_put_from_layers."""
+        logger.info("EC DEBUG put() called: key=%s", key)
         addr = tensor.data_ptr()
         nbytes = tensor.nbytes
         results = self._store.batch_put_from_layers(
