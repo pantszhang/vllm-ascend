@@ -156,11 +156,19 @@ class EcMemcacheBackend:
         return tensor
 
     def _stats(self) -> str:
+        total_hits = sum(self._cnt_hits.values())
+        if self._cnt_gets > 0:
+            offload_rate = (self._cnt_gets - self._cnt_stores) / self._cnt_gets * 100
+            compute_rate = self._cnt_stores / self._cnt_gets * 100
+        else:
+            offload_rate = compute_rate = 0.0
         return (
             f"[gets={self._cnt_gets} "
             f"stores={self._cnt_stores} "
-            f"hits={sum(self._cnt_hits.values())} "
+            f"hits={total_hits} "
             f"hbm_hits={self._cnt_hits.get('HBM',0)} "
             f"dram_hits={self._cnt_hits.get('DRAM',0)} "
-            f"misses={self._cnt_misses}]"
+            f"misses={self._cnt_misses} "
+            f"offload_hit_rate={offload_rate:.1f}% "
+            f"compute_rate={compute_rate:.1f}%]"
         )
