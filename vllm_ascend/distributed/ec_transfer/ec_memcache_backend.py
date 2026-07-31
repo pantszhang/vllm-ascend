@@ -65,6 +65,10 @@ class EcMemcacheBackend:
         self._local_rank = local_rank
         self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
         self._store = self._init_store()
+        # statistics
+        self._cnt_stores: int = 0
+        self._cnt_hits: dict[str, int] = {"HBM": 0, "DRAM": 0, "SSD": 0}
+        self._cnt_misses: int = 0
 
     def _init_store(self):
         try:
@@ -111,7 +115,9 @@ class EcMemcacheBackend:
                 f"EcMemcacheBackend.put: batch_put_from_layers(L2G) failed "
                 f"ret={ret} key={key} addr=0x{addr:x} nbytes={nbytes}"
             )
-        logger.debug("EcMemcacheBackend.put: key=%s nbytes=%d", key, nbytes)
+        self._cnt_stores += 1
+        logger.info("EC memcache STORE: key=%s nbytes=%d %s",
+                     key, nbytes, self._stats())
 
     def get(
         self, key: str, elem_size: int, hidden_dim: int, dtype: torch.dtype
@@ -120,10 +126,12 @@ class EcMemcacheBackend:
         key_infos = self._store.batch_get_key_info([key])
         ki = key_infos[0]
         if ki.size() == 0:
-            logger.debug("EcMemcacheBackend.get: key=%s not found", key)
+            self._cnt_misses += 1
+            logger.info("EC memcache MISS: key=%s %s", key, self._stats())
             return None
         nbytes = ki.size()
         media = _media_name(ki)
+        self._cnt_hits[media] = self._cnt_hits.get(media, 0) + 1
         num_tokens = nbytes // elem_size // hidden_dim
         tensor = torch.empty(
             num_tokens, hidden_dim, dtype=dtype, device="npu"
@@ -142,7 +150,16 @@ class EcMemcacheBackend:
                 f"ret={ret} key={key} addr=0x{addr:x} nbytes={nbytes}"
             )
         logger.info(
-            "EcMemcacheBackend.get: key=%s nbytes=%d num_tokens=%d media=%s",
-            key, nbytes, num_tokens, media,
+            "EC memcache HIT: key=%s nbytes=%d tokens=%d media=%s %s",
+            key, nbytes, num_tokens, media, self._stats(),
         )
         return tensor
+
+    def _stats(self) -> str:
+        return (
+            f"[stores={self._cnt_stores} "
+            f"hits={sum(self._cnt_hits.values())} "
+            f"hbm_hits={self._cnt_hits.get('HBM',0)} "
+            f"dram_hits={self._cnt_hits.get('DRAM',0)} "
+            f"misses={self._cnt_misses}]"
+        )

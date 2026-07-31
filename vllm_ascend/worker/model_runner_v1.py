@@ -339,36 +339,25 @@ class NPUModelRunner(GPUModelRunner):
 
                 def __setitem__(self, key, value):
                     if isinstance(key, str) and not key.startswith("tmp_"):
-                        # Real encoder output → memcache only
                         try:
                             _store.put(key, value)
-                            logger.info(
-                                "EC memcache STORE: mm_hash=%s nbytes=%d",
-                                key, value.nbytes,
-                            )
                         except Exception as e:
                             logger.warning(
                                 "EC memcache STORE failed: %s key=%s", e, key,
                             )
                     else:
-                        # tmp_ keys → local dict (profiling)
                         super().__setitem__(key, value)
 
                 def get(self, key, default=None):
                     if isinstance(key, str) and not key.startswith("tmp_"):
-                        # Real key → memcache
                         try:
                             tensor = _store.get(key)
                             if tensor is not None:
-                                logger.info(
-                                    "EC memcache HIT: mm_hash=%s", key,
-                                )
                                 return tensor
                         except Exception as e:
                             logger.warning(
                                 "EC memcache GET failed: %s key=%s", e, key,
                             )
-                    # tmp_ key or memcache miss → fallback to local dict
                     return super().get(key, default)
 
             self.encoder_cache = _EcMemcacheDict(_real_dict)
