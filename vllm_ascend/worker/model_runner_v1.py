@@ -338,11 +338,6 @@ class NPUModelRunner(GPUModelRunner):
                 """
 
                 def __setitem__(self, key, value):
-                    logger.info(
-                        "EC DEBUG __setitem__: type=%s key=%s nbytes=%s",
-                        type(key).__name__, key,
-                        value.nbytes if hasattr(value, "nbytes") else "?",
-                    )
                     if isinstance(key, str) and not key.startswith("tmp_"):
                         try:
                             _store.put(key, value)

@@ -69,7 +69,6 @@ class EncoderCacheStore:
 
     def put(self, mm_hash: str, tensor: torch.Tensor) -> None:
         """Store *tensor* as the encoder output for *mm_hash*."""
-        logger.info("EC DEBUG EncoderCacheStore.put() called: mm_hash=%s", mm_hash)
         key = self._make_key(mm_hash)
         self._store.put(key, tensor)
 

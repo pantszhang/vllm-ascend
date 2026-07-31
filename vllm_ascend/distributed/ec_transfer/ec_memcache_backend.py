@@ -64,9 +64,9 @@ class EcMemcacheBackend:
         self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
         self._store = self._init_store()
         # statistics
-        self._cnt_stores: int = 0
+        self._cnt_new_store: int = 0  # encoder computed first time → STORE
         self._cnt_hits: dict[str, int] = {"HBM": 0, "DRAM": 0, "SSD": 0}
-        self._cnt_misses: int = 0
+        self._cnt_read_miss: int = 0  # memcache had no data on GET
 
     def _init_store(self):
         try:
@@ -99,7 +99,6 @@ class EcMemcacheBackend:
 
     def put(self, key: str, tensor: torch.Tensor) -> None:
         """Store *tensor* under *key* via batch_put_from_layers."""
-        logger.info("EC DEBUG put() called: key=%s", key)
         addr = tensor.data_ptr()
         nbytes = tensor.nbytes
         results = self._store.batch_put_from_layers(
@@ -114,7 +113,7 @@ class EcMemcacheBackend:
                 f"EcMemcacheBackend.put: batch_put_from_layers(L2G) failed "
                 f"ret={ret} key={key} addr=0x{addr:x} nbytes={nbytes}"
             )
-        self._cnt_stores += 1
+        self._cnt_new_store += 1
         logger.info("EC memcache STORE: key=%s nbytes=%d %s",
                      key, nbytes, self._stats())
 
@@ -125,8 +124,8 @@ class EcMemcacheBackend:
         key_infos = self._store.batch_get_key_info([key])
         ki = key_infos[0]
         if ki.size() == 0:
-            self._cnt_misses += 1
-            logger.info("EC memcache MISS: key=%s %s", key, self._stats())
+            self._cnt_read_miss += 1
+            logger.warning("EC memcache READ_MISS: key=%s %s", key, self._stats())
             return None
         nbytes = ki.size()
         media = _media_name(ki)
@@ -156,9 +155,9 @@ class EcMemcacheBackend:
 
     def _stats(self) -> str:
         return (
-            f"[stores={self._cnt_stores} "
-            f"hits={sum(self._cnt_hits.values())} "
-            f"hbm_hits={self._cnt_hits.get('HBM',0)} "
-            f"dram_hits={self._cnt_hits.get('DRAM',0)} "
-            f"misses={self._cnt_misses}]"
+            f"[new_store={self._cnt_new_store} "
+            f"hit={sum(self._cnt_hits.values())} "
+            f"(HBM={self._cnt_hits.get('HBM',0)} "
+            f"DRAM={self._cnt_hits.get('DRAM',0)}) "
+            f"read_miss={self._cnt_read_miss}]"
         )
