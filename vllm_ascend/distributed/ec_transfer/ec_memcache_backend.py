@@ -42,6 +42,18 @@ _STORE_INIT_WAIT_S = 0.1
 _COPY_L2G = 0  # SMEMB_COPY_L2G
 _COPY_G2L = 1  # SMEMB_COPY_G2L
 
+_MEDIA_NAMES = {0: "HBM", 1: "DRAM", 2: "SSD"}
+
+def _media_name(key_info) -> str:
+    """Return human-readable media type from a KeyInfo object."""
+    try:
+        types = key_info.type_list()
+        if types:
+            return _MEDIA_NAMES.get(types[0], str(types[0]))
+    except Exception:
+        pass
+    return "?"
+
 
 class EcMemcacheBackend:
     """Lightweight memcache wrapper for embedding storage.
@@ -111,6 +123,7 @@ class EcMemcacheBackend:
             logger.debug("EcMemcacheBackend.get: key=%s not found", key)
             return None
         nbytes = ki.size()
+        media = _media_name(ki)
         num_tokens = nbytes // elem_size // hidden_dim
         tensor = torch.empty(
             num_tokens, hidden_dim, dtype=dtype, device="npu"
@@ -128,8 +141,8 @@ class EcMemcacheBackend:
                 f"EcMemcacheBackend.get: batch_get_into_layers(G2L) failed "
                 f"ret={ret} key={key} addr=0x{addr:x} nbytes={nbytes}"
             )
-        logger.debug(
-            "EcMemcacheBackend.get: key=%s nbytes=%d num_tokens=%d",
-            key, nbytes, num_tokens,
+        logger.info(
+            "EcMemcacheBackend.get: key=%s nbytes=%d num_tokens=%d media=%s",
+            key, nbytes, num_tokens, media,
         )
         return tensor
