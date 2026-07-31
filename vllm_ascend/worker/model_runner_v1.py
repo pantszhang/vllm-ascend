@@ -326,115 +326,50 @@ class NPUModelRunner(GPUModelRunner):
             self.encoder_cache_store = EncoderCacheStore(
                 vllm_config, get_world_group().local_rank
             )
-            # Bounded HBM cache: when total tensor bytes exceed the limit,
-            # evict oldest entries (LRU).  Dict misses then fall through
-            # to memcache so offload reads actually happen.
             _store = self.encoder_cache_store
             _real_dict = self.encoder_cache
-            _max_bytes = int(
-                getattr(
-                    ascend_config.ec_memcache_config,
-                    "local_cache_hbm_gb",
-                    0.5,  # default 0.5 GB if config predates the field
-                )
-                * 1024 * 1024 * 1024
-            )
 
             class _EcMemcacheDict(dict):
-                """LRU dict bounded by total tensor bytes in HBM.
+                """Memcache-only encoder cache proxy.
 
-                - __setitem__ stores locally + mirrors to memcache.
-                  Evicts oldest entries when total exceeds _max_bytes.
-                - get() returns local hit if present, otherwise queries
-                  memcache and backfills on success.
+                Real encoder outputs (mm_hash) go directly to memcache —
+                no local HBM copy.  Temporary profiling keys (tmp_*) stay
+                in the local dict for fast access during profile_run.
                 """
 
-                _total_bytes: int = 0
-
-                def _state(self) -> str:
-                    gb = self._total_bytes / (1024 * 1024 * 1024)
-                    max_gb = _max_bytes / (1024 * 1024 * 1024)
-                    return (
-                        f"entries={len(self)} "
-                        f"bytes={self._total_bytes} "
-                        f"GB={gb:.2f}/{max_gb:.2f}"
-                    )
-
                 def __setitem__(self, key, value):
-                    # Evict oldest entries until there is room
-                    nbytes = value.nbytes if hasattr(value, "nbytes") else 0
-                    while (
-                        len(self) > 0
-                        and self._total_bytes + nbytes > _max_bytes
-                    ):
-                        evicted_key = next(iter(self))
-                        self._evict(evicted_key)
-
-                    super().__setitem__(key, value)
-                    self._total_bytes += nbytes
-
-                    if not isinstance(key, str) or key.startswith("tmp_"):
-                        return
-                    try:
-                        _store.put(key, value)
-                        logger.info(
-                            "EC memcache STORE: mm_hash=%s nbytes=%d %s",
-                            key, value.nbytes, self._state(),
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "EC memcache STORE failed: %s key=%s", e, key,
-                        )
-
-                def _backfill(self, key, tensor):
-                    """Put *tensor* into local cache without mirroring to
-                    memcache (it already came from there)."""
-                    nbytes = tensor.nbytes if hasattr(tensor, "nbytes") else 0
-                    while (
-                        len(self) > 0
-                        and self._total_bytes + nbytes > _max_bytes
-                    ):
-                        evicted_key = next(iter(self))
-                        self._evict(evicted_key)
-                    super().__setitem__(key, tensor)
-                    self._total_bytes += nbytes
+                    if isinstance(key, str) and not key.startswith("tmp_"):
+                        # Real encoder output → memcache only
+                        try:
+                            _store.put(key, value)
+                            logger.info(
+                                "EC memcache STORE: mm_hash=%s nbytes=%d",
+                                key, value.nbytes,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "EC memcache STORE failed: %s key=%s", e, key,
+                            )
+                    else:
+                        # tmp_ keys → local dict (profiling)
+                        super().__setitem__(key, value)
 
                 def get(self, key, default=None):
-                    if key in self:
-                        logger.info(
-                            "EC cache LOCAL_HIT: mm_hash=%s %s",
-                            key, self._state(),
-                        )
-                        return super().get(key, default)
                     if isinstance(key, str) and not key.startswith("tmp_"):
+                        # Real key → memcache
                         try:
                             tensor = _store.get(key)
                             if tensor is not None:
-                                self._backfill(key, tensor)
                                 logger.info(
-                                    "EC memcache HIT: mm_hash=%s %s",
-                                    key, self._state(),
+                                    "EC memcache HIT: mm_hash=%s", key,
                                 )
                                 return tensor
                         except Exception as e:
                             logger.warning(
                                 "EC memcache GET failed: %s key=%s", e, key,
                             )
-                    logger.info(
-                        "EC memcache MISS: mm_hash=%s %s",
-                        key, self._state(),
-                    )
+                    # tmp_ key or memcache miss → fallback to local dict
                     return super().get(key, default)
-
-                def _evict(self, key):
-                    tensor = super().get(key)
-                    nbytes = tensor.nbytes if tensor is not None and hasattr(tensor, "nbytes") else 0
-                    self._total_bytes -= nbytes
-                    del self[key]
-                    logger.info(
-                        "EC cache EVICT: mm_hash=%s nbytes=%d %s",
-                        key, nbytes, self._state(),
-                    )
 
             self.encoder_cache = _EcMemcacheDict(_real_dict)
 
