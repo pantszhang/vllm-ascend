@@ -335,7 +335,13 @@ class NPUModelRunner(GPUModelRunner):
                 Writes go to both memcache (shared across workers) and the
                 local dict (safety net for upstream assertions when memcache
                 evicts).  Temporary profiling keys (tmp_*) stay local-only.
+
+                ``_fresh`` tracks keys stored by ``put()`` in the current
+                step.  When ``get()`` consumes a fresh key it counts as a
+                MISS (the original scheduler-level miss), not a HIT.
                 """
+
+                _fresh: set = set()
 
                 def __setitem__(self, key, value):
                     if isinstance(key, str) and not key.startswith("tmp_"):
@@ -345,14 +351,23 @@ class NPUModelRunner(GPUModelRunner):
                             logger.warning(
                                 "EC memcache STORE failed: %s key=%s", e, key,
                             )
-                        # Also write to local dict — safety net when memcache
-                        # evicts a key that the scheduler still tracks.
                         dict.__setitem__(self, key, value)
+                        _fresh.add(key)
                     else:
                         super().__setitem__(key, value)
 
                 def get(self, key, default=None):
                     if isinstance(key, str) and not key.startswith("tmp_"):
+                        # ① Fresh from this step's put() — count as MISS
+                        if key in _fresh:
+                            _store.record_get_miss()
+                            _fresh.discard(key)
+                            return dict.__getitem__(self, key)
+                        # ② Previously cached in local dict — count as HIT
+                        if key in self:
+                            _store.record_local_hit()
+                            return dict.__getitem__(self, key)
+                        # ③ Genuine memcache lookup (other worker / session)
                         try:
                             tensor = _store.get(key)
                             if tensor is not None:
@@ -362,10 +377,8 @@ class NPUModelRunner(GPUModelRunner):
                             logger.warning(
                                 "EC memcache GET failed: %s key=%s", e, key,
                             )
-                        # Memcache miss (evicted) — fall back to local dict
-                        # so the upstream assert doesn't fire.
-                        if key in self:
-                            return super().get(key)
+                        # ④ Memcache miss — not in local dict either (rare)
+                        # _store.get() already recorded gets+1, misses+1
                     return super().get(key, default)
 
             self.encoder_cache = _EcMemcacheDict(_real_dict)
