@@ -352,16 +352,16 @@ class NPUModelRunner(GPUModelRunner):
                                 "EC memcache STORE failed: %s key=%s", e, key,
                             )
                         dict.__setitem__(self, key, value)
-                        _fresh.add(key)
+                        _EcMemcacheDict._fresh.add(key)
                     else:
                         super().__setitem__(key, value)
 
                 def get(self, key, default=None):
                     if isinstance(key, str) and not key.startswith("tmp_"):
                         # ① Fresh from this step's put() — count as MISS
-                        if key in _fresh:
+                        if key in _EcMemcacheDict._fresh:
                             _store.record_get_miss()
-                            _fresh.discard(key)
+                            _EcMemcacheDict._fresh.discard(key)
                             return dict.__getitem__(self, key)
                         # ② Previously cached in local dict — count as HIT
                         if key in self:
