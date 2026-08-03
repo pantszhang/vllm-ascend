@@ -104,11 +104,18 @@ class EncoderCacheManagerWithStore(EncoderCacheManager):
             self.cached[mm_hash].discard(req_id)
             if not self.cached[mm_hash]:
                 del self.cached[mm_hash]
+                # Notify the worker to free the local dict entry (safety net).
+                # Memcache keeps its copy for cross-worker sharing; only the
+                # local reference is freed here.
+                self.freed.append(mm_hash)
 
     def get_freed_mm_hashes(self) -> list[str]:
-        # memcache manages eviction; scheduler never instructs the worker
-        # to free encoder cache entries.
-        return []
+        # Return freed hashes so the scheduler can tell the worker to clean
+        # up its local dict.  Memcache entries are NOT evicted — they survive
+        # for cross-worker sharing and are LRU-evicted by the pool.
+        freed = self.freed
+        self.freed = []
+        return freed
 
     def can_allocate(
         self,

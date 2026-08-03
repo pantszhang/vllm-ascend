@@ -330,11 +330,11 @@ class NPUModelRunner(GPUModelRunner):
             _real_dict = self.encoder_cache
 
             class _EcMemcacheDict(dict):
-                """Memcache-only encoder cache proxy.
+                """Memcache-backed encoder cache proxy.
 
-                Real encoder outputs (mm_hash) go directly to memcache —
-                no local HBM copy.  Temporary profiling keys (tmp_*) stay
-                in the local dict for fast access during profile_run.
+                Writes go to both memcache (shared across workers) and the
+                local dict (safety net for upstream assertions when memcache
+                evicts).  Temporary profiling keys (tmp_*) stay local-only.
                 """
 
                 def __setitem__(self, key, value):
@@ -345,14 +345,23 @@ class NPUModelRunner(GPUModelRunner):
                             logger.warning(
                                 "EC memcache STORE failed: %s key=%s", e, key,
                             )
+                        # Also write to local dict — safety net when memcache
+                        # evicts a key that the scheduler still tracks.
+                        dict.__setitem__(self, key, value)
                     else:
                         super().__setitem__(key, value)
 
                 def get(self, key, default=None):
                     if isinstance(key, str) and not key.startswith("tmp_"):
+                        # Fast path: local dict (avoids memcache G2L copy).
+                        if key in self:
+                            return super().get(key)
                         try:
                             tensor = _store.get(key)
                             if tensor is not None:
+                                # Backfill local dict for future fast access
+                                # and as safety net against memcache eviction.
+                                dict.__setitem__(self, key, tensor)
                                 return tensor
                         except Exception as e:
                             logger.warning(
@@ -1511,11 +1520,12 @@ class NPUModelRunner(GPUModelRunner):
     def _process_encoder_cache_scheduler_output(
         self, scheduler_output
     ) -> None:
-        if self.use_ec_memcache_offload:
-            pass  # memcache manages its own eviction
-        else:
-            for mm_hash in scheduler_output.free_encoder_mm_hashes:
-                self.encoder_cache.pop(mm_hash, None)
+        # Always pop freed hashes from the local dict to prevent memory
+        # leaks.  In memcache mode memcache entries are NOT evicted here —
+        # they survive for cross-worker sharing and are LRU-evicted by
+        # the memcache pool when necessary.
+        for mm_hash in scheduler_output.free_encoder_mm_hashes:
+            self.encoder_cache.pop(mm_hash, None)
 
     def reset_encoder_cache(self) -> None:
         if self.use_ec_memcache_offload:
