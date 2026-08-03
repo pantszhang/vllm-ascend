@@ -273,43 +273,109 @@ _gather_mm_embeddings  → get() → gets++      ← 后跑
 
 核心矛盾：新图的"调度器判定 MISS → 计算 → store"这条路径，在 get() 看来永远是 HIT（数据已存入）。**HIT 有双重含义——"之前就有的缓存"和"刚算出来存进去的"。**
 
-### 修复（commit `605052c95`）
+### 修复（commit `c2899fe64` → `a7ecb9011`）
 
-**目标语义**：
-- `gets`：收到多少次 encoder cache 查询（`_gather_mm_embeddings` 中的 `encoder_cache.get()` 调用）
-- `hits`：在 memcache 中直接命中（数据之前就存在）
-- `misses`：memcache 中找不到（被 LRU 淘汰）
-- 保证：`gets = hits + misses`
-
-**不再用 `stores` 参与比率计算**。`stores` 只作为独立指标展示（总共写入了多少次 memcache）。
+**最终方案**：引入 `_fresh` 集合标记本 step 刚 put 的 key。
 
 ```
-_EcMemcacheDict.get() 的最终逻辑：
+put(key)                           get(key)
+  ├─ memcache                        ├─ key in _fresh?  ──→ MISS  (本 step 刚存的)
+  ├─ local dict                      ├─ key in self?    ──→ HIT   (之前就缓存的)
+  └─ _fresh.add(key)                 └─ memcache        ──→ HIT/MISS (其他 worker)
+```
+
+**`_EcMemcacheDict` 完整代码**：
+
+```python
+class _EcMemcacheDict(dict):
+    _fresh: set = set()  # keys stored by put() in the current step
+
+    def __setitem__(self, key, value):
+        if isinstance(key, str) and not key.startswith("tmp_"):
+            try:
+                _store.put(key, value)
+            except Exception as e:
+                logger.warning(...)
+            dict.__setitem__(self, key, value)
+            _EcMemcacheDict._fresh.add(key)       # 标记"刚存的"
+        else:
+            super().__setitem__(key, value)
 
     def get(self, key, default=None):
         if isinstance(key, str) and not key.startswith("tmp_"):
-            try:
-                tensor = _store.get(key)      # ① 始终走 memcache
-                                               #   gets+1, hit 或 miss+1
-                if tensor is not None:
-                    dict.__setitem__(self, key, tensor)  # 回填 local dict
-                    return tensor
-            except Exception:
-                ...
-            # ② memcache miss（淘汰）→ local dict 兜底 → assert 不炸
+            # ① 本 step 刚 put 的 → 逻辑 MISS
+            if key in _EcMemcacheDict._fresh:
+                _store.record_get_miss()
+                _EcMemcacheDict._fresh.discard(key)
+                return dict.__getitem__(self, key)
+            # ② 之前就缓存的 → 逻辑 HIT
             if key in self:
-                return super().get(key)
+                _store.record_local_hit()
+                return dict.__getitem__(self, key)
+            # ③ 其他 worker / 之前的 session → memcache
+            try:
+                tensor = _store.get(key)
+                if tensor is not None:
+                    dict.__setitem__(self, key, tensor)
+                    return tensor
+            except Exception as e:
+                logger.warning(...)
+            # ④ memcache miss (被淘汰) — 罕见
         return super().get(key, default)
 ```
 
-`_stats()` 公式：
+**`EcMemcacheBackend` 新增方法**：
 
 ```python
-if self._cnt_gets > 0:
-    offload_rate = total_hits / self._cnt_gets * 100
-    compute_rate = self._cnt_misses / self._cnt_gets * 100
+def record_get_miss(self) -> None:
+    """Record a logical get + miss (data was just stored or evicted)."""
+    self._cnt_gets += 1
+    self._cnt_misses += 1
+
+def record_local_hit(self) -> None:
+    """Record a get that hit in local dict (previously cached)."""
+    self._cnt_gets += 1
+    self._cnt_hits["local"] = self._cnt_hits.get("local", 0) + 1
 ```
 
-**`compute_rate` 的含义变了**：不再是"多少图需要计算"，而是"多少 memcache 查询命中失败（被淘汰）"。大部分时间 `compute_rate ≈ 0%`（memcache 很少淘汰），`offload_hit_rate ≈ 100%`。
+**`_stats()` 公式**：
 
-要了解实际计算量，看 `stores` 指标即可——每 store 一次代表调度器判定了一次 MISS 并计算了一张新图。
+```python
+total_hits = sum(self._cnt_hits.values())  # 包含 "local" 命中
+offload_rate = total_hits / self._cnt_gets * 100
+compute_rate = self._cnt_misses / self._cnt_gets * 100
+```
+
+### 最终语义
+
+| 指标 | 含义 | 来源 |
+|------|------|------|
+| `gets` | 收到多少次 cache 查询 | `_gather_mm_embeddings` |
+| `hits` | 之前就缓存好的（local + memcache） | `record_local_hit()` + memcache HIT |
+| `misses` | 本 step 刚算的 / memcache 淘汰的 | `record_get_miss()` + memcache MISS |
+| `stores` | 总共写入了多少次 memcache | `put()` |
+
+**保证**：`gets = hits + misses` 恒成立，两个比率永远在 0~100%。
+
+### 数值示例
+
+请求 1（7 张新图 + 3 张已缓存）：
+```
+_execute_mm_encoder:  7 puts → _fresh={7 keys}, stores=7
+_gather_mm_embeddings:
+  7 keys in _fresh → gets+7, misses+7
+  3 keys in self   → gets+3, hits+3
+结果: gets=10, hits=3, misses=7, stores=7
+      offload_hit_rate=30%, compute_rate=70%
+```
+
+请求 2（相同 10 张图）：
+```
+_execute_mm_encoder:  0 puts → _fresh={}, stores=7
+_gather_mm_embeddings:
+  10 keys in self → gets+10, hits+10
+结果: gets=20, hits=13, misses=7, stores=7
+      offload_hit_rate=65%, compute_rate=35%
+```
+
+请求 N 后：`offload_hit_rate → 100%`，`compute_rate → 0%`。
