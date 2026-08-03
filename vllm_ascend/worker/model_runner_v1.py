@@ -1492,21 +1492,20 @@ class NPUModelRunner(GPUModelRunner):
         self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
         if self.use_ec_memcache_offload:
             logger.info("EC memcache STORE: mm_hash=%s bytes=%d", mm_hash, output.nbytes)
-            self.encoder_cache_store.put(mm_hash, output)
 
     def _get_encoder_output_from_cache(
         self, mm_hash: str
     ) -> torch.Tensor | None:
-        if mm_hash in self.encoder_cache:
-            logger.info("EC cache LOCAL_HIT: mm_hash=%s", mm_hash)
-            return self.encoder_cache[mm_hash]
         if self.use_ec_memcache_offload:
             tensor = self.encoder_cache_store.get(mm_hash)
             if tensor is not None:
                 logger.info("EC memcache HIT: mm_hash=%s", mm_hash)
-                self.encoder_cache[mm_hash] = tensor
                 return tensor
             logger.info("EC memcache MISS: mm_hash=%s", mm_hash)
+            return None
+        if mm_hash in self.encoder_cache:
+            logger.info("EC cache LOCAL_HIT: mm_hash=%s", mm_hash)
+            return self.encoder_cache[mm_hash]
         return None
 
     def _process_encoder_cache_scheduler_output(
