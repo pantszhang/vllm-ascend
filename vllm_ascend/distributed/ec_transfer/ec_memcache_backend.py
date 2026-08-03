@@ -155,16 +155,6 @@ class EcMemcacheBackend:
         )
         return tensor
 
-    def record_get_miss(self) -> None:
-        """Record a logical get + miss (data was just stored or evicted)."""
-        self._cnt_gets += 1
-        self._cnt_misses += 1
-
-    def record_local_hit(self) -> None:
-        """Record a get that hit in local dict (previously cached)."""
-        self._cnt_gets += 1
-        self._cnt_hits["local"] = self._cnt_hits.get("local", 0) + 1
-
     def _stats(self) -> str:
         total_hits = sum(self._cnt_hits.values())
         if self._cnt_gets > 0:
