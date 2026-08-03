@@ -356,17 +356,14 @@ class NPUModelRunner(GPUModelRunner):
                         try:
                             tensor = _store.get(key)
                             if tensor is not None:
-                                # Backfill local dict — safety net in case
-                                # memcache later evicts this key while the
-                                # scheduler still tracks it.
                                 dict.__setitem__(self, key, tensor)
                                 return tensor
                         except Exception as e:
                             logger.warning(
                                 "EC memcache GET failed: %s key=%s", e, key,
                             )
-                        # Memcache miss — fall back to local dict, which may
-                        # still hold the entry if memcache evicted it.
+                        # Memcache miss (evicted) — fall back to local dict
+                        # so the upstream assert doesn't fire.
                         if key in self:
                             return super().get(key)
                     return super().get(key, default)

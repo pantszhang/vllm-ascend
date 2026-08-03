@@ -114,7 +114,6 @@ class EcMemcacheBackend:
                 f"EcMemcacheBackend.put: batch_put_from_layers(L2G) failed "
                 f"ret={ret} key={key} addr=0x{addr:x} nbytes={nbytes}"
             )
-        self._cnt_misses += 1
         self._cnt_stores += 1
         logger.info("EC memcache STORE: key=%s nbytes=%d %s",
                      key, nbytes, self._stats())
@@ -158,10 +157,9 @@ class EcMemcacheBackend:
 
     def _stats(self) -> str:
         total_hits = sum(self._cnt_hits.values())
-        total_ops = total_hits + self._cnt_misses
-        if total_ops > 0:
-            offload_rate = total_hits / total_ops * 100
-            compute_rate = self._cnt_misses / total_ops * 100
+        if self._cnt_gets > 0:
+            offload_rate = total_hits / self._cnt_gets * 100
+            compute_rate = self._cnt_misses / self._cnt_gets * 100
         else:
             offload_rate = compute_rate = 0.0
         return (
