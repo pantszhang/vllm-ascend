@@ -354,10 +354,6 @@ class NPUModelRunner(GPUModelRunner):
 
                 def get(self, key, default=None):
                     if isinstance(key, str) and not key.startswith("tmp_"):
-                        # Local dict already has it — return directly.
-                        if key in self:
-                            return super().get(key)
-                        # Genuine memcache lookup.
                         try:
                             tensor = _store.get(key)
                             if tensor is not None:
@@ -367,6 +363,9 @@ class NPUModelRunner(GPUModelRunner):
                             logger.warning(
                                 "EC memcache GET failed: %s key=%s", e, key,
                             )
+                        # Memcache miss (evicted) — local dict safety net
+                        if key in self:
+                            return super().get(key)
                     return super().get(key, default)
 
             self.encoder_cache = _EcMemcacheDict(_real_dict)
