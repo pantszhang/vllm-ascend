@@ -353,20 +353,22 @@ class NPUModelRunner(GPUModelRunner):
 
                 def get(self, key, default=None):
                     if isinstance(key, str) and not key.startswith("tmp_"):
-                        # Fast path: local dict (avoids memcache G2L copy).
-                        if key in self:
-                            return super().get(key)
                         try:
                             tensor = _store.get(key)
                             if tensor is not None:
-                                # Backfill local dict for future fast access
-                                # and as safety net against memcache eviction.
+                                # Backfill local dict — safety net in case
+                                # memcache later evicts this key while the
+                                # scheduler still tracks it.
                                 dict.__setitem__(self, key, tensor)
                                 return tensor
                         except Exception as e:
                             logger.warning(
                                 "EC memcache GET failed: %s key=%s", e, key,
                             )
+                        # Memcache miss — fall back to local dict, which may
+                        # still hold the entry if memcache evicted it.
+                        if key in self:
+                            return super().get(key)
                     return super().get(key, default)
 
             self.encoder_cache = _EcMemcacheDict(_real_dict)
