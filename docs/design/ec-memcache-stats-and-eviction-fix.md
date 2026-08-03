@@ -234,3 +234,82 @@ def get(self, key, default=None):
 - memcache 有 → ① 命中 → 返回 ✓
 - memcache 被淘汰 → ① miss → ② local dict 命中 → 返回 ✓
 - 都没有 → 返回 None（但调度器不会在这种情况下说 LOCAL_HIT）
+
+---
+
+## 问题 4：misses 和 hits 语义混乱，compute_rate > 100%
+
+### 现象
+
+```
+EC memcache STORE: gets=3 stores=4 hits=3 misses=0 offload_hit_rate=-33.3% compute_rate=133.3%
+EC memcache STORE: gets=3 stores=10 hits=3 misses=0 offload_hit_rate=-233.3% compute_rate=333.3%
+```
+
+`compute_rate > 100%`，`offload_hit_rate < 0%`。
+
+### 根因
+
+**`put()` 和 `get()` 在同一个 step 内的执行顺序不同**：
+
+```
+_execute_mm_encoder    → put() → stores++    ← 先跑
+_gather_mm_embeddings  → get() → gets++      ← 后跑
+```
+
+在 `_execute_mm_encoder` 阶段 stores 已经涨上去了，gets 还没动。旧公式 `compute_rate = stores / gets * 100` 必然超过 100%。
+
+更深层的问题是 **misses 和 hits 的语义混乱**：
+
+```
+旧代码:
+  put()  → 无 miss 记录               (调度器判定的 MISS 没被记录)
+  get()  → ki.size()>0 → hits+1      (刚存进去的也算 HIT)
+  get()  → ki.size()==0 → misses+1   (只有 memcache 淘汰才触发)
+
+结果：一张新图在 get() 时永远 HIT（刚 put 进去的），所以 misses=0。
+     但 stores 已经 +1 了，compute_rate = stores / gets 自然 > 100%。
+```
+
+核心矛盾：新图的"调度器判定 MISS → 计算 → store"这条路径，在 get() 看来永远是 HIT（数据已存入）。**HIT 有双重含义——"之前就有的缓存"和"刚算出来存进去的"。**
+
+### 修复（commit `605052c95`）
+
+**目标语义**：
+- `gets`：收到多少次 encoder cache 查询（`_gather_mm_embeddings` 中的 `encoder_cache.get()` 调用）
+- `hits`：在 memcache 中直接命中（数据之前就存在）
+- `misses`：memcache 中找不到（被 LRU 淘汰）
+- 保证：`gets = hits + misses`
+
+**不再用 `stores` 参与比率计算**。`stores` 只作为独立指标展示（总共写入了多少次 memcache）。
+
+```
+_EcMemcacheDict.get() 的最终逻辑：
+
+    def get(self, key, default=None):
+        if isinstance(key, str) and not key.startswith("tmp_"):
+            try:
+                tensor = _store.get(key)      # ① 始终走 memcache
+                                               #   gets+1, hit 或 miss+1
+                if tensor is not None:
+                    dict.__setitem__(self, key, tensor)  # 回填 local dict
+                    return tensor
+            except Exception:
+                ...
+            # ② memcache miss（淘汰）→ local dict 兜底 → assert 不炸
+            if key in self:
+                return super().get(key)
+        return super().get(key, default)
+```
+
+`_stats()` 公式：
+
+```python
+if self._cnt_gets > 0:
+    offload_rate = total_hits / self._cnt_gets * 100
+    compute_rate = self._cnt_misses / self._cnt_gets * 100
+```
+
+**`compute_rate` 的含义变了**：不再是"多少图需要计算"，而是"多少 memcache 查询命中失败（被淘汰）"。大部分时间 `compute_rate ≈ 0%`（memcache 很少淘汰），`offload_hit_rate ≈ 100%`。
+
+要了解实际计算量，看 `stores` 指标即可——每 store 一次代表调度器判定了一次 MISS 并计算了一张新图。
