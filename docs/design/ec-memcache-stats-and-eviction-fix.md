@@ -171,3 +171,66 @@ def _process_encoder_cache_scheduler_output(self, scheduler_output):
 - **local dict**：存 Python 引用（指向 NPU 原始 tensor），生命周期和调度器引用计数完全同步。保证"调度器承诺有的，local dict 就一定还有"。作为 memcache 淘汰时的安全兜底。
 - **memcache**：独立 LRU 管理，调度器不干预。跨 worker 共享仍然有效。如果没被淘汰，get 走 local dict 快速路径（免 G2L copy）。
 - **两者互不干扰**：memcache 淘汰不影响 local dict；local dict 的 pop 不影响 memcache。
+
+---
+
+## 问题 3：local dict 快速路径导致统计全为 0
+
+### 现象
+
+```
+EC memcache STORE: gets=0 stores=83 hits=0 hbm_hits=0 dram_hits=0 misses=0
+```
+
+`gets`、`hits`、`misses` 始终为 0，只有 `stores` 在增长。
+
+### 根因
+
+问题 2 的修复中，`_EcMemcacheDict.get()` 加入了 local dict 快速路径：
+
+```python
+def get(self, key, default=None):
+    if isinstance(key, str) and not key.startswith("tmp_"):
+        if key in self:                            # ① local dict 快速路径
+            return super().get(key)                 # ← 直接返回！
+        tensor = _store.get(key)                   # ② memcache（计数器在这里）
+        ...
+```
+
+`__setitem__` 写入 local dict 后，下一次 `get()` 在步骤 ① 就命中了，**直接返回，跳过了步骤 ②**。而 `_cnt_gets`、`_cnt_hits`、`_cnt_misses` 全都在 `EcMemcacheBackend.get()`（步骤 ②）里统计。local dict 快速路径绕过了计数器，导致统计全为 0。
+
+```
+第一次请求:
+  __setitem__ → memcache ✓ + local dict ✓
+
+第二次请求（同一个 key）:
+  get() → if key in self: 命中! → 直接返回  ← 没调用 _store.get()
+                                          ← 计数器全不更新
+```
+
+### 修复（commit `f1e49f864`）
+
+去掉 local dict 快速路径，**始终先走 `_store.get()`** 保证计数器更新。local dict 只在 memcache miss 时作为兜底：
+
+```python
+def get(self, key, default=None):
+    if isinstance(key, str) and not key.startswith("tmp_"):
+        try:
+            tensor = _store.get(key)              # ① 始终先走 memcache（更新计数器）
+            if tensor is not None:
+                dict.__setitem__(self, key, tensor)  # 回填 local dict
+                return tensor
+        except Exception as e:
+            ...
+        # Memcache miss — local dict 兜底（memcache 被淘汰的情况）
+        if key in self:                            # ② local dict 兜底
+            return super().get(key)
+    return super().get(key, default)
+```
+
+关键：**local dict 从"快速路径"降级为"兜底路径"**。计数器准确性优先，local dict 只处理 memcache 淘汰的异常情况。
+
+这个改动不会导致问题 2 的 assert 崩溃复发——local dict 仍然在 memcache miss 后兜底。调度器承诺有的 key，一定能取到：
+- memcache 有 → ① 命中 → 返回 ✓
+- memcache 被淘汰 → ① miss → ② local dict 命中 → 返回 ✓
+- 都没有 → 返回 None（但调度器不会在这种情况下说 LOCAL_HIT）
