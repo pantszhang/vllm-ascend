@@ -77,6 +77,14 @@ class EncoderCacheStore:
         key = self._make_key(mm_hash)
         return self._store.get(key, self._elem_size, self._hidden_dim, self._dtype)
 
+    def record_get_miss(self) -> None:
+        """Delegate: record a logical get + miss."""
+        self._store.record_get_miss()
+
+    def record_local_hit(self) -> None:
+        """Delegate: record a get that hit local dict."""
+        self._store.record_local_hit()
+
     # ---- ZMQ server ----
 
     def _zmq_loop(self) -> None:
