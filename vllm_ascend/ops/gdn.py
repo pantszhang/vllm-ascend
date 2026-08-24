@@ -33,6 +33,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops._gdn_probe import probe_cann_interface
 from vllm_ascend.ops.causal_conv1d import causal_conv1d_run
+from vllm_ascend.ops.gdn_recurrent import recurrent_gated_delta_rule_run
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -455,7 +456,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
             # The custom op extends dtype support (e.g. float32 state) and is
             # loaded at runtime via ASCEND_CUSTOM_OPP_PATH.
-            core_attn_out_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+            core_attn_out_spec = recurrent_gated_delta_rule_run(
                 query=query_spec.squeeze(0),
                 key=key_spec.squeeze(0),
                 value=value_spec.squeeze(0),
@@ -479,7 +480,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_decode = l2norm_fwd(query_decode)
             key_decode = l2norm_fwd(key_decode)
-            core_attn_out_decode = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+            core_attn_out_decode = recurrent_gated_delta_rule_run(
                 query=query_decode.squeeze(0),
                 key=key_decode.squeeze(0),
                 value=value_decode.squeeze(0),
@@ -563,7 +564,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             key_non_spec = l2norm_fwd(key_non_spec)
             # Dispatches to the vllm-ascend AscendC custom operator
             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
-            core_attn_out_non_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+            core_attn_out_non_spec = recurrent_gated_delta_rule_run(
                 query=query_non_spec.squeeze(0),
                 key=key_non_spec.squeeze(0),
                 value=value_non_spec.squeeze(0),
