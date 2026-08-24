@@ -19,7 +19,10 @@ Measures prefill (chunk pipeline vs CANN fused op) and decode (recurrent step)
 latencies with realistic Qwen3.5 shapes, so the phase-2 replacement order can
 be decided by measured hot spots. Run on the A5 box from the vllm-ascend root:
 
-    python3 scripts/gdn_op_profiling.py
+    PYTHONPATH=. python3 scripts/gdn_op_profiling.py
+
+The decode path goes through the probe-fallback wrapper; set
+VLLM_ASCEND_GDN_CANN_RECURRENT=off|auto to control which side is exercised.
 """
 
 from __future__ import annotations
@@ -29,6 +32,8 @@ import time
 import torch
 
 from scripts.gdn_op_accuracy_check import l2norm, make_case, run_cann, run_triton
+from vllm_ascend.ops._gdn_probe import probe_cann_interface
+from vllm_ascend.ops.gdn_recurrent import recurrent_gated_delta_rule_run
 
 PREFILL = dict(nk=8, nv=8, dk=128, dv=128, seq_len=4096, seed=42)
 DECODE = dict(nk=8, nv=8, dk=128, dv=128, seq_len=1, seed=42)
@@ -60,7 +65,7 @@ def bench_prefill():
 
 
 def bench_decode():
-    """Single decode step: self-developed AscendC recurrent op (mainline)."""
+    """Single decode step via recurrent_gated_delta_rule_run (probe-fallback)."""
     q, k, v, beta, g, s0 = make_case(**DECODE)
     dev = torch.device("npu")
     q, k, v = q.to(dev), k.to(dev), v.to(dev)
@@ -72,7 +77,7 @@ def bench_decode():
     ssm_state_indices = torch.zeros(1, dtype=torch.int64, device=dev)
 
     def step():
-        torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+        recurrent_gated_delta_rule_run(
             query=l2norm(q).to(torch.bfloat16),
             key=l2norm(k).to(torch.bfloat16),
             value=v.to(torch.bfloat16),
@@ -87,6 +92,12 @@ def bench_decode():
     t_rec = timeit(step, warmup=3, iters=100)
     print(f"decode   T=1 Nk={DECODE['nk']} Nv={DECODE['nv']}: "
           f"recurrent_ascendc={t_rec * 1e3:.1f}us/step")
+    _probe = probe_cann_interface(
+        "VLLM_ASCEND_GDN_CANN_RECURRENT",
+        ("npu_recurrent_gated_delta_rule",),
+        lambda fn: None,
+    )
+    print(f"recurrent dispatch: CANN={_probe.available}")
 
 
 if __name__ == "__main__":

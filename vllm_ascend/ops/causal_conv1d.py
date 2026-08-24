@@ -23,9 +23,14 @@ conv1d interface when one exists and passes a smoke test. Controlled by env
 
 from __future__ import annotations
 
+import os
+
 import torch
+from vllm.logger import init_logger
 
 from vllm_ascend.ops._gdn_probe import probe_cann_interface
+
+logger = init_logger(__name__)
 
 
 def _conv1d_smoke_test(fn) -> None:
@@ -71,9 +76,17 @@ def causal_conv1d_run(
     if probe.available:
         try:
             # CANN call: same data, dispatch to the probed torch_npu interface.
-            return probe.fn(mixed_qkv, conv_weights_T, bias_opt)
+            # The CANN op may return a new tensor; the contract with callers is
+            # in-place into `output`, so copy the result back.
+            res = probe.fn(mixed_qkv, conv_weights_T, bias_opt)
+            output.copy_(res)
+            return output
         except Exception:
-            pass  # fall through to the mainline custom op
+            logger.warning_once(
+                "CANN conv1d dispatch failed at runtime; falling back to the "
+                "self-developed AscendC op (VLLM_ASCEND_GDN_CANN_CONV1D=%s)",
+                os.environ.get("VLLM_ASCEND_GDN_CANN_CONV1D", "auto"),
+            )
     return torch.ops._C_ascend.npu_causal_conv1d_custom(
         output,
         mixed_qkv,

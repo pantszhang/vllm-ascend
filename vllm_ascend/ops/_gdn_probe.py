@@ -26,6 +26,9 @@ import os
 from typing import Callable
 
 import torch_npu
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class ProbeResult:
@@ -79,6 +82,13 @@ def probe_cann_interface(
         raise RuntimeError(
             f"{env_var}=on but none of {candidate_names} passed the smoke test; "
             "the installed CANN package may not provide the implementation yet."
+        )
+    if selected is None:
+        logger.warning_once(
+            "GDN CANN interface probe for %s failed (candidates: %s); "
+            "falling back to the mainline implementation",
+            env_var,
+            ", ".join(candidate_names),
         )
     res = ProbeResult(selected is not None, selected)
     _cache[env_var] = res

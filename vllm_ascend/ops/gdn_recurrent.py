@@ -24,17 +24,22 @@ opportunistically dispatches to the CANN ``recurrent_gated_delta_rule`` through
 
 from __future__ import annotations
 
+import os
+
 import torch
+from vllm.logger import init_logger
 
 from vllm_ascend.ops._gdn_probe import probe_cann_interface
+
+logger = init_logger(__name__)
 
 
 def _recurrent_smoke_test(fn) -> None:
     """Minimal single-step decode call: Dk == Dv == 128, Nk == Nv == 1.
 
-    State is bf16 here because the CANN op only supports a bf16 state, while
-    the mainline custom op keeps fp32 state - dtype compatibility across the
-    prefill->decode boundary is validated separately at model level.
+    State is fp32 here to probe with the runtime fp32 state dtype - the mainline
+    custom op keeps fp32 state across prefill->decode, so the probe must cover
+    the real decode path.
     """
     device = torch.npu.current_device()
     dk = dv = 128
@@ -43,7 +48,7 @@ def _recurrent_smoke_test(fn) -> None:
     value = torch.zeros((1, 1, dv), dtype=torch.bfloat16, device=device)
     g = torch.full((1, 1), -0.1, dtype=torch.float32, device=device)
     beta = torch.full((1, 1), 0.5, dtype=torch.bfloat16, device=device)
-    state = torch.zeros((1, 1, dv, dk), dtype=torch.bfloat16, device=device)
+    state = torch.zeros((1, 1, dv, dk), dtype=torch.float32, device=device)
     actual_seq_lengths = torch.tensor([1], dtype=torch.int32, device=device)
     ssm_state_indices = torch.zeros(1, dtype=torch.int64, device=device)
     fn(
@@ -96,7 +101,20 @@ def recurrent_gated_delta_rule_run(
         kwargs["num_accepted_tokens"] = num_accepted_tokens
     if probe.available:
         try:
-            return probe.fn(**kwargs)
+            res = probe.fn(**kwargs)
+            # Enforce the in-place state contract of the mainline custom op:
+            # the CANN interface may return (o, new_state) or update state in
+            # place. Either way the caller's `state` tensor must reflect the
+            # updated state after this call.
+            if isinstance(res, (tuple, list)):
+                o, state_out = res[0], res[1]
+                state.copy_(state_out)
+                return o
+            return res
         except Exception:
-            pass  # fall through to the mainline custom op
+            logger.warning_once(
+                "CANN recurrent dispatch failed at runtime; falling back to the "
+                "self-developed AscendC op (VLLM_ASCEND_GDN_CANN_RECURRENT=%s)",
+                os.environ.get("VLLM_ASCEND_GDN_CANN_RECURRENT", "auto"),
+            )
     return torch.ops._C_ascend.npu_recurrent_gated_delta_rule(**kwargs)
