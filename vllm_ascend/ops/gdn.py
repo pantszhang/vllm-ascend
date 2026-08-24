@@ -32,6 +32,7 @@ from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops._gdn_probe import probe_cann_interface
+from vllm_ascend.ops.causal_conv1d import causal_conv1d_run
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -309,7 +310,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
             output_spec = torch.empty_like(mixed_qkv_spec)
-            torch.ops._C_ascend.npu_causal_conv1d_custom(
+            causal_conv1d_run(
                 output_spec,
                 mixed_qkv_spec,
                 conv_weights_T,
@@ -356,7 +357,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                             pcp_rank - 1, ...
                         ].transpose(-1, -2)
                     mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
-                    torch.ops._C_ascend.npu_causal_conv1d_custom(
+                    causal_conv1d_run(
                         mixed_qkv_non_spec_output,
                         mixed_qkv_non_spec,
                         conv_weights_T,
@@ -379,7 +380,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
                     mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
-                    torch.ops._C_ascend.npu_causal_conv1d_custom(
+                    causal_conv1d_run(
                         mixed_qkv_non_spec_output,
                         mixed_qkv_non_spec,
                         conv_weights_T,
@@ -400,7 +401,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             non_spec_causal_conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
             non_spec_query_start_loc_device = non_spec_causal_conv1d_meta.query_start_loc
             output_non_spec = torch.empty_like(mixed_qkv_non_spec)
-            torch.ops._C_ascend.npu_causal_conv1d_custom(
+            causal_conv1d_run(
                 output_non_spec,
                 mixed_qkv_non_spec,
                 conv_weights_T,
