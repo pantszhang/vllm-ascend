@@ -31,10 +31,41 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
+from vllm_ascend.ops._gdn_probe import probe_cann_interface
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+
+
+def _gdn_chunk_smoke_test(fn) -> None:
+    """Minimal smoke call matching the op constraints (Dk == Dv == 128, Nv % Nk == 0).
+
+    B=1, one short sequence. Any exception marks the interface unavailable
+    (on A5 the official CANN package may not ship this op yet - the smoke
+    call then fails and we keep the Triton pipeline).
+    """
+    device = torch.npu.current_device()
+    dk = dv = 128
+    nk, nv, seqlen = 1, 1, 64
+    q = torch.zeros((seqlen, nk, dk), dtype=torch.bfloat16, device=device)
+    k = torch.zeros((seqlen, nk, dk), dtype=torch.bfloat16, device=device)
+    v = torch.zeros((seqlen, nv, dv), dtype=torch.bfloat16, device=device)
+    beta = torch.full((seqlen, nv), 0.5, dtype=torch.bfloat16, device=device)
+    g = torch.full((seqlen, nv), -0.1, dtype=torch.float32, device=device)
+    initial_state = torch.zeros((1, nv, dv, dk), dtype=torch.bfloat16, device=device)
+    actual_seq_lengths = torch.tensor([seqlen], dtype=torch.int32, device=device)
+    fn(
+        q,
+        k,
+        v,
+        beta=beta,
+        initial_state=initial_state,
+        actual_seq_lengths=actual_seq_lengths,
+        scale=dk**-0.5,
+        g=g,
+    )
+    torch.npu.synchronize()
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -46,48 +77,17 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _probe_fused_chunk(cls) -> bool:
         """Whether ``torch_npu.npu_chunk_gated_delta_rule`` can actually be used.
 
-        The interface must exist AND a minimal smoke call must succeed (the op is
-        unavailable on some CANN builds / devices). Any failure disables the
-        fused path so we fall back to the Triton pipeline. The result is cached
-        on the class, so only the first layer runs the smoke call.
+        Delegates to the shared probe helper (``vllm_ascend/ops/_gdn_probe.py``);
+        see there for the ``VLLM_ASCEND_GDN_FUSED_CHUNK`` auto/on/off semantics.
+        The result is cached on the class, so only the first layer probes.
         """
         if cls._fused_chunk_available is not None:
             return cls._fused_chunk_available
-
-        if not hasattr(torch_npu, "npu_chunk_gated_delta_rule"):
-            cls._fused_chunk_available = False
-            return False
-
-        # TODO(2026/8/6): The A5‑specific implementation is not available in the official release.
-        # Invoking npu_chunk_gated_delta_rule will result in errors.
-        # Remove this conditional block after the new A5 CANN package is released.
-        try:
-            # Minimal smoke call matching the op constraints (Dk == Dv == 128,
-            # Nv % Nk == 0). B=1, one short sequence.
-            device = torch.npu.current_device()
-            dk = dv = 128
-            nk, nv, seqlen = 1, 1, 64
-            q = torch.zeros((seqlen, nk, dk), dtype=torch.bfloat16, device=device)
-            k = torch.zeros((seqlen, nk, dk), dtype=torch.bfloat16, device=device)
-            v = torch.zeros((seqlen, nv, dv), dtype=torch.bfloat16, device=device)
-            beta = torch.full((seqlen, nv), 0.5, dtype=torch.bfloat16, device=device)
-            g = torch.full((seqlen, nv), -0.1, dtype=torch.float32, device=device)
-            initial_state = torch.zeros((1, nv, dv, dk), dtype=torch.bfloat16, device=device)
-            actual_seq_lengths = torch.tensor([seqlen], dtype=torch.int32, device=device)
-            torch_npu.npu_chunk_gated_delta_rule(
-                q,
-                k,
-                v,
-                beta=beta,
-                initial_state=initial_state,
-                actual_seq_lengths=actual_seq_lengths,
-                scale=dk**-0.5,
-                g=g,
-            )
-            torch.npu.synchronize()
-            cls._fused_chunk_available = True
-        except Exception:
-            cls._fused_chunk_available = False
+        cls._fused_chunk_available = probe_cann_interface(
+            env_var="VLLM_ASCEND_GDN_FUSED_CHUNK",
+            candidate_names=("npu_chunk_gated_delta_rule",),
+            smoke_test=_gdn_chunk_smoke_test,
+        ).available
         return cls._fused_chunk_available
 
     @staticmethod
