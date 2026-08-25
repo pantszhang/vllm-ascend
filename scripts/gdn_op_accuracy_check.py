@@ -31,6 +31,7 @@ import sys
 
 import torch
 import torch_npu  # noqa: F401
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 THRESHOLD = 2e-2  # bf16 max relative error threshold (phase-0 baseline; tighten later)
 
@@ -151,6 +152,7 @@ def main() -> int:
     args = ap.parse_args()
 
     assert torch.npu.is_available(), "this script must run on an Ascend NPU"
+    init_device_properties_triton()
     names = sorted(CASES) if args.cases == "all" else [c.strip() for c in args.cases.split(",")]
     failures = []
     print(f"{'case':<18}{'triton_vs_ref':>16}{'cann_vs_ref(o)':>18}{'cann_vs_ref(S)':>18}  status")
