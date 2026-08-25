@@ -27,15 +27,19 @@ Run on the A5 box from the vllm-ascend repo root:
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 import torch_npu  # noqa: F401
-import vllm_ascend.vllm_ascend_C  # noqa: F401
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.utils import bootstrap_custom_op_env
+
+bootstrap_custom_op_env(include_vendor_lib=True)
+importlib.import_module("vllm_ascend.vllm_ascend_C")
 
 THRESHOLD = 2e-2  # bf16 max relative error threshold (phase-0 baseline; tighten later)
 
