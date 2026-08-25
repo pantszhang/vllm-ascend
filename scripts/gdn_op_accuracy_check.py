@@ -166,10 +166,16 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cases", default="base", help="comma-separated case names or 'all'")
     ap.add_argument("--threshold", type=float, default=THRESHOLD)
+    ap.add_argument(
+        "--skip-triton",
+        action="store_true",
+        help="skip the vllm-ascend Triton/AscendC baseline and check CANN only",
+    )
     args = ap.parse_args()
 
     assert torch.npu.is_available(), "this script must run on an Ascend NPU"
-    init_device_properties_triton()
+    if not args.skip_triton:
+        init_device_properties_triton()
     names = sorted(CASES) if args.cases == "all" else [c.strip() for c in args.cases.split(",")]
     failures = []
     print(f"{'case':<18}{'triton_vs_ref':>16}{'cann_vs_ref(o)':>18}{'cann_vs_ref(S)':>18}  status")
@@ -183,8 +189,11 @@ def main() -> int:
 
         o_ref, s_ref = gdn_naive_reference(q.cpu(), k.cpu(), v.cpu(), beta.cpu(), g.cpu(), s0.cpu(), scale)
 
-        o_tri, _ = run_triton(q, k, v, beta, g, s0, scale)
-        err_tri = max_rel_err(o_tri.cpu(), o_ref)
+        if args.skip_triton:
+            err_tri = float("nan")
+        else:
+            o_tri, _ = run_triton(q, k, v, beta, g, s0, scale)
+            err_tri = max_rel_err(o_tri.cpu(), o_ref)
 
         cann = run_cann(q, k, v, beta, g, s0, scale)
         if cann is None:
@@ -194,7 +203,7 @@ def main() -> int:
             o_cann, s_cann = cann
             err_cann_o = max_rel_err(o_cann.cpu(), o_ref)
             err_cann_s = max_rel_err(s_cann.cpu(), s_ref)
-            status = "PASS"
+            status = "PASS(cann-only)" if args.skip_triton else "PASS"
         # Triton 基线始终参与阈值检查（nan 与阈值比较恒为 False，SKIP 分支天然兼容）。
         bad = [e for e in (err_tri, err_cann_o, err_cann_s) if e > args.threshold]
         if bad:
