@@ -33,6 +33,7 @@ from unittest.mock import patch
 
 import torch
 import torch_npu  # noqa: F401
+import vllm_ascend.vllm_ascend_C  # noqa: F401
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
