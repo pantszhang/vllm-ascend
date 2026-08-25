@@ -38,9 +38,6 @@ from vllm.forward_context import ForwardContext, override_forward_context
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import bootstrap_custom_op_env
 
-bootstrap_custom_op_env(include_vendor_lib=True)
-importlib.import_module("vllm_ascend.vllm_ascend_C")
-
 THRESHOLD = 2e-2  # bf16 max relative error threshold (phase-0 baseline; tighten later)
 
 CASES = {
@@ -175,6 +172,8 @@ def main() -> int:
 
     assert torch.npu.is_available(), "this script must run on an Ascend NPU"
     if not args.skip_triton:
+        bootstrap_custom_op_env(include_vendor_lib=True)
+        importlib.import_module("vllm_ascend.vllm_ascend_C")
         init_device_properties_triton()
     names = sorted(CASES) if args.cases == "all" else [c.strip() for c in args.cases.split(",")]
     failures = []
