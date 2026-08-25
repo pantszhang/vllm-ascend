@@ -28,9 +28,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch_npu  # noqa: F401
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 THRESHOLD = 2e-2  # bf16 max relative error threshold (phase-0 baseline; tighten later)
@@ -123,21 +126,30 @@ def run_cann(q, k, v, beta, g, initial_state, scale):
 
 def run_triton(q, k, v, beta, g, initial_state, scale):
     """Mainline chunk pipeline (6 sub-ops). State layout differs; only o is compared."""
-    from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
+    from vllm_ascend.ops.triton.fla import chunk as chunk_module
 
     T = q.shape[0]
-    o, _ = chunk_gated_delta_rule(
-        q=q[None].to(torch.bfloat16),
-        k=k[None].to(torch.bfloat16),
-        v=v[None].to(torch.bfloat16),
-        g=g[None].to(torch.float32),
-        beta=beta[None].to(torch.bfloat16),
-        scale=scale,
-        initial_state=None,
-        output_final_state=True,
-        cu_seqlens=torch.tensor([0, T], dtype=torch.int64, device=q.device),
-        use_qk_l2norm_in_kernel=True,
+    forward_context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
     )
+    single_rank_pcp = SimpleNamespace(world_size=1)
+    with override_forward_context(forward_context), patch.object(
+        chunk_module, "get_pcp_group", return_value=single_rank_pcp
+    ):
+        o, _ = chunk_module.chunk_gated_delta_rule(
+            q=q[None].to(torch.bfloat16),
+            k=k[None].to(torch.bfloat16),
+            v=v[None].to(torch.bfloat16),
+            g=g[None].to(torch.float32),
+            beta=beta[None].to(torch.bfloat16),
+            scale=scale,
+            initial_state=None,
+            output_final_state=True,
+            cu_seqlens=torch.tensor([0, T], dtype=torch.int64, device=q.device),
+            use_qk_l2norm_in_kernel=True,
+        )
     return o.squeeze(0), None
 
 
