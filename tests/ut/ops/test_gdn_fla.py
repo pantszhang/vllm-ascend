@@ -426,7 +426,6 @@ def test_prefill_pipeline_rejects_non_integral_grouped_heads():
         )
 
 
-def test_stateful_runtime_probe_falls_back_without_mutating_live_state():
 def test_runtime_probe_falls_back_on_invalid_output_contract():
     dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
 
