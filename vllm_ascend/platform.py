@@ -107,6 +107,36 @@ def _import_fla_npu_before_custom_opp() -> None:
         logger.warning(
             "fla_npu is not importable; GDN fla paths will fall back to native: %s", exc
         )
+
+
+def _validate_fla_gdn_graph_mode(vllm_config: VllmConfig) -> None:
+    """Keep FLA Phase6 outside graphs while allowing decode-only capture."""
+    from vllm.config.compilation import CUDAGraphMode
+
+    from vllm_ascend.ops.gdn_fla import (
+        GDNBackendMode,
+        GDNOperator,
+        parse_gdn_backend_config,
+    )
+
+    config = parse_gdn_backend_config(
+        os.environ.get("VLLM_ASCEND_GDN_BACKEND", "auto"),
+        os.environ.get("VLLM_ASCEND_GDN_OP_BACKENDS", ""),
+    )
+    phase6_mode = config.mode_for(GDNOperator.GDN_CORE_FWD)
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+
+    # FULL_DECODE_ONLY is supported because gdn_core_fwd_phase6 is requested
+    # only from ordinary Prefill, never from Decode capture/replay.
+    if cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL:
+        return
+    if phase6_mode is GDNBackendMode.FLA_NPU:
+        raise ValueError(
+            "FLA gdn_core_fwd_phase6 does not support Prefill FULL graph; "
+            "use cudagraph_mode=FULL_DECODE_ONLY or GDN backend=native."
+        )
+
+
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_CAPTURE_SIZES_FOR_950 = 4
 
@@ -1045,6 +1075,8 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
             cudagraph_mode,
         )
         compilation_config.cudagraph_mode = cudagraph_mode
+
+    _validate_fla_gdn_graph_mode(vllm_config)
 
 
 def _setup_compile_backend(

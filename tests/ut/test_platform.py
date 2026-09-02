@@ -15,6 +15,7 @@ from vllm_ascend.platform import (
     _import_fla_npu_before_custom_opp,
     _setup_compile_backend,
     _validate_eplb_config,
+    _validate_fla_gdn_graph_mode,
 )
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -114,6 +115,27 @@ class TestFlaGDNPreload(PytestBase):
         NPUPlatform.import_kernels()
 
         assert events == ["fla_npu", "custom_opp"]
+
+
+class TestFlaGDNGraphMode(PytestBase):
+    @pytest.mark.parametrize("mtp", [False, True])
+    def test_allows_full_decode_only(self, monkeypatch, mtp):
+        config = TestNPUPlatform.mock_vllm_config()
+        config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        config.speculative_config = MagicMock() if mtp else None
+        monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "fla_npu")
+        monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
+
+        _validate_fla_gdn_graph_mode(config)
+
+    def test_rejects_strict_fla_with_full_graph(self, monkeypatch):
+        config = TestNPUPlatform.mock_vllm_config()
+        config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+        monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "fla_npu")
+        monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
+
+        with pytest.raises(ValueError, match="FULL_DECODE_ONLY"):
+            _validate_fla_gdn_graph_mode(config)
 
 
 class TestNPUPlatform(TestBase):
