@@ -94,10 +94,9 @@ class GDNOperator(StrEnum):
     GDN_CORE_FWD = "gdn_core_fwd"
 
 
-_STAGE1_NATIVE_ONLY = {
-    GDNOperator.L2NORM_FWD,
-}
-_STAGE1_REPLACEMENTS = tuple(operator for operator in GDNOperator if operator not in _STAGE1_NATIVE_ONLY)
+# Phase 6 exposes one FLA replacement: the fused full-prefill kernel.  The
+# remaining operators are intentionally kept on the native pipeline.
+_FLA_REPLACEABLE_OPERATORS = frozenset({GDNOperator.GDN_CORE_FWD})
 
 
 @dataclass(frozen=True)
@@ -374,6 +373,8 @@ def _first_line(exc: BaseException) -> str:
 def resolve_fla_operator(operator: GDNOperator) -> tuple[Callable[..., Any], str]:
     """Resolve a public fla_npu operator without importing it on native paths."""
 
+    if operator not in _FLA_REPLACEABLE_OPERATORS:
+        raise ValueError("only gdn_core_fwd may use fla_npu")
     if operator is GDNOperator.RECURRENT_GATED_DELTA_RULE:
         return _resolve_fla_recurrent_operator()
     module_name, attribute = _FLA_OPERATOR_PATHS[operator]
@@ -431,6 +432,13 @@ class FlaGDNOperatorDispatcher:
 
         requested = self.config.mode_for(operator)
         if not self.is_supported_soc or requested is GDNBackendMode.NATIVE:
+            selection = GDNOperatorSelection(GDNBackendMode.NATIVE, native, native_symbol)
+            self._remember(operator, signature, selection)
+            return selection
+
+        # A global fla_npu mode still uses the native six-operator pipeline;
+        # only the phase-6 fused operator is eligible for FLA dispatch.
+        if requested is GDNBackendMode.FLA_NPU and operator not in _FLA_REPLACEABLE_OPERATORS:
             selection = GDNOperatorSelection(GDNBackendMode.NATIVE, native, native_symbol)
             self._remember(operator, signature, selection)
             return selection
@@ -798,7 +806,7 @@ class FlaGDNAdapter:
     @staticmethod
     def _validate_strict_symbols(config: GDNBackendConfig) -> None:
         failures: list[str] = []
-        for operator in _STAGE1_REPLACEMENTS:
+        for operator in _FLA_REPLACEABLE_OPERATORS:
             if config.mode_for(operator) is not GDNBackendMode.FLA_NPU:
                 continue
             try:
@@ -1481,18 +1489,13 @@ def parse_gdn_backend_config(mode: str, operator_overrides: str) -> GDNBackendCo
             raise ValueError(f"Invalid GDN operator backend override {raw_entry!r}: unknown backend.") from exc
         if backend is GDNBackendMode.AUTO:
             raise ValueError(f"Invalid GDN operator backend override {raw_entry!r}: auto is only a global mode.")
-        if backend is GDNBackendMode.FLA_NPU and operator in _STAGE1_NATIVE_ONLY:
+        if backend is GDNBackendMode.FLA_NPU and operator not in _FLA_REPLACEABLE_OPERATORS:
             raise ValueError(
                 f"Invalid GDN operator backend override {raw_entry!r}: "
-                f"{operator.value} is retained native in Stage 1."
+                "only gdn_core_fwd may use fla_npu"
             )
         if operator in overrides:
             raise ValueError(f"Invalid GDN operator backend override {raw_entry!r}: duplicate operator.")
         overrides[operator] = backend
 
     return GDNBackendConfig(parsed_mode, overrides)
-
-
-# Compatibility aliases for callers that imported the original A5-only names.
-A5GDNOperatorDispatcher = FlaGDNOperatorDispatcher
-A5GDNAdapter = FlaGDNAdapter

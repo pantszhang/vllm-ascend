@@ -73,13 +73,22 @@ def test_parse_gdn_backend_config_accepts_explicit_global_modes():
 def test_parse_gdn_backend_config_accepts_per_operator_overrides():
     config = parse_gdn_backend_config(
         "auto",
-        "causal_conv1d=fla_npu,chunk_fwd_o=native",
+        "gdn_core_fwd=fla_npu,chunk_fwd_o=native",
     )
 
     assert config.overrides == {
-        GDNOperator.CAUSAL_CONV1D: GDNBackendMode.FLA_NPU,
+        GDNOperator.GDN_CORE_FWD: GDNBackendMode.FLA_NPU,
         GDNOperator.CHUNK_FWD_O: GDNBackendMode.NATIVE,
     }
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [operator for operator in GDNOperator if operator is not GDNOperator.GDN_CORE_FWD],
+)
+def test_parse_gdn_backend_config_rejects_non_core_fla_overrides(operator):
+    with pytest.raises(ValueError, match="only gdn_core_fwd may use fla_npu"):
+        parse_gdn_backend_config("auto", f"{operator.value}=fla_npu")
 
 
 @pytest.mark.parametrize("mode", ["", "invalid", "FLA"])
@@ -94,7 +103,6 @@ def test_parse_gdn_backend_config_rejects_invalid_global_mode(mode):
         "unknown=native",
         "causal_conv1d=invalid",
         "causal_conv1d=auto",
-        "l2norm_fwd=fla_npu",
         "causal_conv1d=native,causal_conv1d=fla_npu",
         "causal_conv1d",
         "=native",
@@ -117,16 +125,16 @@ def test_auto_selects_fla_operator_after_successful_probe():
     dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
 
     selection = dispatcher.select(
-        GDNOperator.CHUNK_FWD_O,
+        GDNOperator.GDN_CORE_FWD,
         SIGNATURE,
         native=_native_operator,
-        native_symbol="native.chunk_fwd_o",
-        fla_resolver=lambda: (_fla_operator, "fla_npu.ops.ascendc.chunk_fwd_o"),
+        native_symbol="native.gdn_core",
+        fla_resolver=lambda: (_fla_operator, "fla_npu.ops.ascendc.gdn_core_fwd_phase6"),
         probe=lambda operator: operator("probe") == ("fla_npu", "probe"),
     )
 
     assert selection.backend is GDNBackendMode.FLA_NPU
-    assert selection.symbol == "fla_npu.ops.ascendc.chunk_fwd_o"
+    assert selection.symbol == "fla_npu.ops.ascendc.gdn_core_fwd_phase6"
     assert selection.operator("input") == ("fla_npu", "input")
 
 
@@ -134,10 +142,10 @@ def test_auto_falls_back_when_fla_symbol_is_missing():
     dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
 
     def missing_resolver():
-        raise AttributeError("missing chunk_fwd_o")
+        raise AttributeError("missing gdn_core_fwd_phase6")
 
     selection = dispatcher.select(
-        GDNOperator.CHUNK_FWD_O,
+        GDNOperator.GDN_CORE_FWD,
         SIGNATURE,
         native=_native_operator,
         native_symbol="native.chunk_fwd_o",
@@ -145,7 +153,7 @@ def test_auto_falls_back_when_fla_symbol_is_missing():
     )
 
     assert selection.backend is GDNBackendMode.NATIVE
-    assert selection.reason == "missing chunk_fwd_o"
+    assert selection.reason == "missing gdn_core_fwd_phase6"
     assert selection.operator("input") == ("native", "input")
 
 
@@ -157,7 +165,7 @@ def test_fallback_log_identifies_operator_backend_stage_and_exception():
 
     with patch("vllm_ascend.ops.gdn_fla.logger.warning") as warning:
         dispatcher.select(
-            GDNOperator.SOLVE_TRI,
+            GDNOperator.GDN_CORE_FWD,
             SIGNATURE,
             native=_native_operator,
             native_symbol="native.solve_tri",
@@ -168,7 +176,7 @@ def test_fallback_log_identifies_operator_backend_stage_and_exception():
     assert "op=%s" in message
     assert "requested=%s" in message
     assert "stage=%s" in message
-    assert operator == "solve_tri"
+    assert operator == "gdn_core_fwd"
     assert requested == "auto"
     assert stage == "resolve"
     assert exception_name == "ImportError"
@@ -178,20 +186,20 @@ def test_fallback_log_identifies_operator_backend_stage_and_exception():
 def test_strict_fla_mode_does_not_hide_probe_failure():
     dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("fla_npu", ""), is_supported_soc=True)
 
-    with pytest.raises(RuntimeError, match="chunk_fwd_o.*smoke_probe"):
+    with pytest.raises(RuntimeError, match="gdn_core_fwd.*smoke_probe"):
         dispatcher.select(
-            GDNOperator.CHUNK_FWD_O,
+            GDNOperator.GDN_CORE_FWD,
             SIGNATURE,
             native=_native_operator,
             native_symbol="native.chunk_fwd_o",
-            fla_resolver=lambda: (_fla_operator, "fla_npu.ops.ascendc.chunk_fwd_o"),
+            fla_resolver=lambda: (_fla_operator, "fla_npu.ops.ascendc.gdn_core_fwd_phase6"),
             probe=lambda operator: False,
         )
 
 
 def test_strict_adapter_validation_aggregates_missing_symbols(monkeypatch):
     def resolver(operator):
-        if operator in {GDNOperator.CAUSAL_CONV1D, GDNOperator.SOLVE_TRI}:
+        if operator is GDNOperator.GDN_CORE_FWD:
             raise ImportError(f"missing {operator.value}")
         return _fla_operator, f"fla_npu.{operator.value}"
 
@@ -205,8 +213,7 @@ def test_strict_adapter_validation_aggregates_missing_symbols(monkeypatch):
         )
 
     message = str(error.value)
-    assert "causal_conv1d: missing causal_conv1d" in message
-    assert "solve_tri: missing solve_tri" in message
+    assert "gdn_core_fwd: missing gdn_core_fwd" in message
 
 
 def test_native_mode_does_not_resolve_fla_operator():
@@ -246,17 +253,17 @@ def test_selection_is_cached_for_the_same_operator_and_signature():
     def resolver():
         nonlocal resolves
         resolves += 1
-        return _fla_operator, "fla_npu.ops.ascendc.chunk_fwd_o"
+        return _fla_operator, "fla_npu.ops.ascendc.gdn_core_fwd_phase6"
 
     first = dispatcher.select(
-        GDNOperator.CHUNK_FWD_O,
+        GDNOperator.GDN_CORE_FWD,
         SIGNATURE,
         native=_native_operator,
         native_symbol="native.chunk_fwd_o",
         fla_resolver=resolver,
     )
     second = dispatcher.select(
-        GDNOperator.CHUNK_FWD_O,
+        GDNOperator.GDN_CORE_FWD,
         SIGNATURE,
         native=_native_operator,
         native_symbol="native.chunk_fwd_o",
@@ -274,16 +281,16 @@ def test_runtime_error_is_propagated_without_fallback():
         raise RuntimeError(f"failed after receiving {value}")
 
     selection = dispatcher.select(
-        GDNOperator.RECURRENT_GATED_DELTA_RULE,
+        GDNOperator.GDN_CORE_FWD,
         SIGNATURE,
         native=_native_operator,
-        native_symbol="native.recurrent",
+        native_symbol="native.gdn_core",
         fla_resolver=lambda: (failing_operator, "fla_npu.recurrent"),
     )
 
     with pytest.raises(RuntimeError, match="failed after receiving request"):
         dispatcher.execute(
-            GDNOperator.RECURRENT_GATED_DELTA_RULE,
+            GDNOperator.GDN_CORE_FWD,
             selection,
             "request",
             phase="decode",
