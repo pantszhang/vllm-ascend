@@ -436,9 +436,9 @@ class FlaGDNOperatorDispatcher:
             self._remember(operator, signature, selection)
             return selection
 
-        # A global fla_npu mode still uses the native six-operator pipeline;
-        # only the phase-6 fused operator is eligible for FLA dispatch.
-        if requested is GDNBackendMode.FLA_NPU and operator not in _FLA_REPLACEABLE_OPERATORS:
+        # Phase 6 keeps every retired operator on the native pipeline in both
+        # global modes; only the fused core operator may dispatch to FLA.
+        if operator not in _FLA_REPLACEABLE_OPERATORS:
             selection = GDNOperatorSelection(GDNBackendMode.NATIVE, native, native_symbol)
             self._remember(operator, signature, selection)
             return selection

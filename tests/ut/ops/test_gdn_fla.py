@@ -138,6 +138,25 @@ def test_auto_selects_fla_operator_after_successful_probe():
     assert selection.operator("input") == ("fla_npu", "input")
 
 
+@pytest.mark.parametrize(
+    "operator",
+    [operator for operator in GDNOperator if operator is not GDNOperator.GDN_CORE_FWD],
+)
+def test_auto_keeps_non_core_operators_native(operator):
+    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
+
+    selection = dispatcher.select(
+        operator,
+        SIGNATURE,
+        native=_native_operator,
+        native_symbol=f"native.{operator.value}",
+        fla_resolver=lambda: pytest.fail("retired operator must not resolve fla_npu"),
+    )
+
+    assert selection.backend is GDNBackendMode.NATIVE
+    assert selection.operator("input") == ("native", "input")
+
+
 def test_auto_falls_back_when_fla_symbol_is_missing():
     dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
 
@@ -407,159 +426,7 @@ def test_prefill_pipeline_rejects_non_integral_grouped_heads():
         )
 
 
-def test_causal_conv_adapter_maps_stateful_arguments(monkeypatch):
-    calls = []
-
-    def causal_conv(x, weight, bias, conv_states, **kwargs):
-        calls.append((x, weight, bias, conv_states, kwargs))
-        conv_states.add_(1)
-        return x + 2
-
-    monkeypatch.setattr(
-        "vllm_ascend.ops.gdn_fla.resolve_fla_operator",
-        lambda operator: (causal_conv, "fla_npu.ops.ascendc.causal_conv1d"),
-    )
-    adapter = FlaGDNAdapter(
-        parse_gdn_backend_config("fla_npu", ""),
-        SIGNATURE,
-        layer_name="model.layers.0.linear_attn",
-        is_supported_soc=True,
-    )
-    x = torch.zeros((2, 8))
-    weight = torch.zeros((4, 8))
-    bias = torch.zeros((8,))
-    state = torch.zeros((2, 8, 4))
-    query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
-    cache_indices = torch.tensor([3, 7], dtype=torch.int32)
-    initial_state_mode = torch.tensor([0, 1], dtype=torch.int32)
-
-    output = adapter.causal_conv1d(
-        x=x,
-        weight=weight,
-        bias=bias,
-        conv_state=state,
-        query_start_loc=query_start_loc,
-        cache_indices=cache_indices,
-        initial_state_mode=initial_state_mode,
-        activation_mode=1,
-        pad_slot_id=-1,
-        run_mode=0,
-    )
-
-    # The first call is an isolated state clone smoke probe; the second call
-    # applies the operator to the live cache only after the probe succeeds.
-    assert len(calls) == 2
-    assert calls[-1][4] == {
-        "query_start_loc": query_start_loc,
-        "cache_indices": cache_indices,
-        "initial_state_mode": initial_state_mode,
-        "num_accepted_tokens": None,
-        "activation_mode": 1,
-        "pad_slot_id": -1,
-        "run_mode": 0,
-        "head_num": 0,
-    }
-    torch.testing.assert_close(output, x + 2)
-    torch.testing.assert_close(state, torch.ones_like(state))
-
-
 def test_stateful_runtime_probe_falls_back_without_mutating_live_state():
-    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
-    state = torch.zeros((1,))
-
-    def failing_fla(value):
-        value.add_(1)
-        raise RuntimeError("OPP load failed")
-
-    def native(value):
-        value.add_(2)
-        return value
-
-    selection = dispatcher.select(
-        GDNOperator.CAUSAL_CONV1D,
-        SIGNATURE,
-        native=native,
-        native_symbol="native.causal_conv1d",
-        fla_resolver=lambda: (failing_fla, "fla_npu.ops.ascendc.causal_conv1d"),
-    )
-    output = dispatcher.execute_with_runtime_probe(
-        GDNOperator.CAUSAL_CONV1D,
-        SIGNATURE,
-        selection,
-        state,
-        native=native,
-        native_symbol="native.causal_conv1d",
-        phase="decode",
-        layer_name="model.layers.0.linear_attn",
-        state_may_be_mutated=True,
-    )
-
-    torch.testing.assert_close(state, torch.full_like(state, 2))
-    torch.testing.assert_close(output, state)
-
-
-def test_causal_conv_prefill_and_decode_are_probed_separately():
-    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
-    calls = 0
-
-    def causal(input_tensor, weight, bias, conv_state, **kwargs):
-        nonlocal calls
-        del weight, bias, kwargs
-        calls += 1
-        conv_state.add_(1)
-        return input_tensor
-
-    selection = dispatcher.select(
-        GDNOperator.CAUSAL_CONV1D,
-        SIGNATURE,
-        native=causal,
-        native_symbol="native.causal_conv1d",
-        fla_resolver=lambda: (causal, "fla_npu.ops.ascendc.causal_conv1d"),
-    )
-    x = torch.zeros((1, 2))
-    state = torch.zeros((1, 1, 2))
-    common = {
-        "native": causal,
-        "native_symbol": "native.causal_conv1d",
-        "layer_name": "model.layers.0.linear_attn",
-        "state_may_be_mutated": True,
-        "query_start_loc": torch.tensor([0, 1]),
-        "cache_indices": torch.tensor([0]),
-        "initial_state_mode": None,
-        "num_accepted_tokens": None,
-        "activation_mode": 1,
-        "pad_slot_id": -1,
-        "run_mode": 0,
-        "head_num": 0,
-    }
-    dispatcher.execute_with_runtime_probe(
-        GDNOperator.CAUSAL_CONV1D,
-        SIGNATURE,
-        selection,
-        x,
-        torch.zeros((1, 2)),
-        None,
-        state,
-        phase="prefill",
-        **common,
-    )
-    common["run_mode"] = 1
-    dispatcher.execute_with_runtime_probe(
-        GDNOperator.CAUSAL_CONV1D,
-        SIGNATURE,
-        selection,
-        x,
-        torch.zeros((1, 2)),
-        None,
-        state,
-        phase="decode",
-        **common,
-    )
-
-    assert calls == 4
-    torch.testing.assert_close(state, torch.full_like(state, 2))
-
-
 def test_runtime_probe_falls_back_on_invalid_output_contract():
     dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
 
@@ -795,7 +662,7 @@ def test_fla_routing_rejects_non_bfloat16_strict_operator_override(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
     monkeypatch.setenv(
         "VLLM_ASCEND_GDN_OP_BACKENDS",
-        "causal_conv1d=fla_npu",
+        "gdn_core_fwd=fla_npu",
     )
 
     with (
