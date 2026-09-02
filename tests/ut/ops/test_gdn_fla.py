@@ -588,6 +588,31 @@ def test_fla_gdn_routing_supports_a2_a3_and_a5(monkeypatch, soc):
     assert adapter.signature.soc == soc
 
 
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_phase6_prefill_adapter_is_available_with_mtp(monkeypatch, num_spec):
+    monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "fla_npu")
+    monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
+    layer = _fake_gdn_layer()
+    layer.num_spec = num_spec
+
+    with (
+        patch.dict(AscendGatedDeltaNetAttention._fla_gdn_dispatchers, {}, clear=True),
+        patch("vllm_ascend.ops.gdn.get_fla_gdn_soc", return_value="ascend950"),
+        patch(
+            "vllm_ascend.ops.gdn.get_pcp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+        patch.object(FlaGDNAdapter, "_validate_strict_symbols"),
+    ):
+        adapter = AscendGatedDeltaNetAttention._get_fla_gdn_adapter(
+            layer,
+            torch.zeros((1, 128), dtype=torch.bfloat16),
+            torch.float32,
+        )
+
+    assert isinstance(adapter, FlaGDNAdapter)
+
+
 def test_fla_routing_constructs_and_caches_one_adapter(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
     monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
@@ -734,32 +759,28 @@ def test_fla_mixed_decode_prefill_routes_and_merges_outputs():
         actual_seq_lengths=torch.tensor([0, 1], dtype=torch.int32),
     )
 
-    adapter = SimpleNamespace()
-
-    def causal_conv1d(**kwargs):
-        assert kwargs["run_mode"] == 0
+    def native_causal_conv(output, input_tensor, conv_weight, **kwargs):
+        del conv_weight
         torch.testing.assert_close(
-            kwargs["query_start_loc"],
+            kwargs["query_start_loc_opt"],
             torch.tensor([0, 1, 3], dtype=torch.int32),
         )
-        indices = kwargs["cache_indices"].to(torch.int64)
-        update = torch.ones_like(kwargs["conv_state"].index_select(0, indices))
-        kwargs["conv_state"].index_add_(0, indices, update)
-        return kwargs["x"]
+        output.copy_(input_tensor)
+        indices = kwargs["cache_indices_opt"].to(torch.int64)
+        state = kwargs["conv_state"]
+        state.index_add_(0, indices, torch.ones_like(state.index_select(0, indices)))
 
-    def decode(**kwargs):
+    def native_recurrent(**kwargs):
         indices = kwargs["ssm_state_indices"].to(torch.int64)
         update = torch.ones_like(kwargs["state"].index_select(0, indices))
         kwargs["state"].index_add_(0, indices, update)
-        return torch.full_like(kwargs["v"], 10)
+        return torch.full_like(kwargs["value"], 10)
 
     def prefill(**kwargs):
         output = torch.full_like(kwargs["v"], 20)
         return output, kwargs["initial_state"] + 2
 
-    adapter.causal_conv1d = causal_conv1d
-    adapter.decode = decode
-    adapter.prefill = prefill
+    adapter = SimpleNamespace(prefill=prefill)
 
     forward_context = ForwardContext(
         no_compile_layers={layer.prefix: layer},
@@ -786,6 +807,14 @@ def test_fla_mixed_decode_prefill_routes_and_merges_outputs():
         patch(
             "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
             return_value=gating,
+        ),
+        patch(
+            "vllm_ascend.ops.gdn.torch.ops._C_ascend.npu_causal_conv1d_custom",
+            side_effect=native_causal_conv,
+        ),
+        patch(
+            "vllm_ascend.ops.gdn.torch.ops._C_ascend.npu_recurrent_gated_delta_rule",
+            side_effect=native_recurrent,
         ),
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
     ):
