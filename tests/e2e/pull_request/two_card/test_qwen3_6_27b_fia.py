@@ -22,7 +22,6 @@ from vllm.assets.image import ImageAsset
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
 from vllm_ascend.device.device_config import is_fla_gdn_supported
 
-#MODEL = "Qwen/Qwen3.6-27B"
 MODEL = os.environ.get(
     "QWEN36_MODEL_PATH",
     "Qwen/Qwen3.6-27B",
@@ -74,8 +73,8 @@ def test_qwen3_6_27b_multimodel_fia_eager():
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 @pytest.mark.skipif(not is_fla_gdn_supported(), reason="requires A2/A3/A5 FLA GDN support")
 @wait_until_npu_memory_free()
-def test_qwen3_6_27b_gdn_fla_eager_smoke():
-    """Compare the strict FLA GDN adapter against the native eager path."""
+def test_qwen3_6_gdn_phase6_eager_smoke():
+    """Compare strict Phase6 prefill with native GDN on a local Qwen3.6 model."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
     prompts = qwen_prompt(["What is the content of this image?"])
     outputs_by_backend = {}
