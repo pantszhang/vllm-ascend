@@ -1,17 +1,23 @@
 # Qwen GDN integration with flash-linear-attention-npu
 
-The authoritative design is
-[`2026-08-29-qwen35-qwen36-gdn-fla-design.md`](../../../superpowers/specs/2026-08-29-qwen35-qwen36-gdn-fla-design.md).
-This page is a short developer-guide entry, not a second specification.
+Qwen3.5 and Qwen3.6 share the same vLLM-Ascend GDN implementation. This
+integration replaces only eligible Prefill core computation with the fused
+FLA entry point:
+
+```text
+fla_npu.ops.ascendc.gdn_core_fwd_phase6
+```
+
+The authoritative documents are:
+
+- [Phase6-only design](../../../superpowers/specs/2026-09-05-qwen-gdn-phase6-only-refactor-design.md)
+- [Implementation plan](../../../superpowers/plans/2026-09-05-qwen-gdn-phase6-only-refactor.md)
+- [Chinese validation guide](../../../superpowers/guides/2026-09-05-qwen-gdn-phase6-only-validation-guide-zh.md)
 
 ## Scope
 
-Qwen3.5 and Qwen3.6 share one vLLM GDN model path. Eligible eager BF16
-requests on A2, A3, and A5 can use operators from
-`flash-linear-attention-npu` through `fla_npu.ops.ascendc`.
-
-The FLA API and operator source are shared, but the installed wheel and custom
-OPP must match the actual SoC:
+The FLA operator is eligible on A2, A3, and A5 through a device-capability
+mapping rather than an `is_950()` gate:
 
 | Hardware | FLA build target | vLLM-Ascend device family |
 | --- | --- | --- |
@@ -19,81 +25,80 @@ OPP must match the actual SoC:
 | A3 | `ascend910_93` | `AscendDeviceType.A3` |
 | A5 | `ascend950` | `AscendDeviceType.A5` |
 
-310P and unknown device families retain the existing native GDN path.
+The installed FLA wheel and custom OPP must match the target SoC. 310P and
+unknown device families stay on the native path.
 
-## Execution topology
+The current integration deliberately does not replace:
 
-The preferred prefill core is the single fused entry
-`fla_npu.ops.ascendc.gdn_core_fwd_phase6`. It replaces Python orchestration of
-the following six prefill stages:
+- causal convolution or convolution-cache updates;
+- Q/K `l2norm_fwd`;
+- ordinary Decode;
+- MTP/speculative Decode;
+- the native Prefill fallback.
+
+Those operations continue to use the existing vLLM or vLLM-Ascend
+implementations. The six standalone stages represented inside Phase6 are not
+individually selected or called by this integration.
+
+`l2norm_fwd` remains unchanged because Phase6 expects normalized Q/K inputs.
+Replacing the already suitable vLLM implementation would add no fused-kernel
+benefit and would widen the numerical compatibility surface.
+
+## Runtime policy
+
+`VLLM_ASCEND_GDN_BACKEND` accepts:
+
+- `auto` (default): use Phase6 only after eligibility, symbol resolution, and
+  a scratch probe succeed; otherwise select the unchanged native Prefill path;
+- `fla_npu`: require Phase6 and raise an attributed error if eligibility,
+  resolution, or the scratch probe fails;
+- `native`: do not import or call FLA for GDN.
+
+The safe fallback boundary is before a live Phase6 request. A failure during a
+real Phase6 call is logged with symbol, SoC, layer, tensor metadata, and host
+metadata lengths, then propagated. A stateful request is never replayed through
+native Prefill after partial Phase6 execution.
+
+> **PCP limitation:** PCP world size greater than one always uses native
+> Prefill in `auto` mode. Strict `fla_npu` mode rejects this configuration.
+
+## Execution and graph boundary
+
+The Phase6 call is constructed only inside the Prefill branch. It consumes
+normalized Q/K, performs the fused GDN core, returns output plus final SSM
+state, and writes the converted final state back to the existing cache.
+
+MTP does not disable Phase6 for prompt Prefill. MTP Decode still calls the
+existing native recurrent operator. `FULL_DECODE_ONLY` is therefore compatible
+with the integration: eager Prefill may use Phase6 while Decode capture/replay
+contains only the native Decode path. This coexistence does **not** mean that
+`gdn_core_fwd_phase6` itself supports ACL Graph capture.
+
+FLA is imported before vLLM-Ascend custom-OPP bootstrap so both vendor OPP
+directories are visible before kernel-manager indexing. Each package keeps its
+own vendor directory; similarly named `libcust_opapi.so` files must not be
+copied over one another.
+
+## Logging and validation status
+
+Successful strict or automatic selection includes:
 
 ```text
-chunk_local_cumsum
--> chunk_scaled_dot_kkt
--> solve_tri
--> recompute_w_u_fwd
--> chunk_gated_delta_rule_fwd_h
--> chunk_fwd_o
+backend=fla_npu
+symbol=fla_npu.ops.ascendc.gdn_core_fwd_phase6
+soc=ascend910b|ascend910_93|ascend950
 ```
 
-The six standalone entries remain a legacy and diagnostic composition. Causal
-convolution and Q/K normalization remain outside the fused core. Ordinary
-decode uses `recurrent_gated_delta_rule` when its FLA implementation is
-selected. Output normalization, gating, and projection stay in the model layer.
+An automatic native decision identifies `stage=eligibility`, `stage=resolve`,
+or `stage=scratch_probe` and includes the reason. There must be no FLA selection
+log for causal convolution or recurrent Decode.
 
-## Eligibility and backend behavior
+Current validation status:
 
-`get_fla_gdn_soc()` is the hardware capability boundary. The FLA adapter also
-requires BF16 activations, ordinary non-speculative execution, PCP world size
-one, and execution outside ACL Graph capture. Tensor parallelism is allowed.
+- A5 `vllm serve`: verified;
+- A2 end-to-end: pending;
+- A3 end-to-end: pending;
+- ais-bench: pending.
 
-The backend modes are:
-
-- `auto`: resolve eligible FLA operators and otherwise retain the applicable
-  native or legacy path;
-- `fla_npu`: require the configured FLA symbols and fail with attribution when
-  they cannot be selected;
-- `native`: preserve the original vLLM-Ascend path.
-
-One current limitation is important: after Phase 6 resolves successfully, a
-failure in its first live-shape runtime probe does not yet restart the request
-through the six-stage composition. The failure is logged and propagated. See
-the authoritative design for the exact resolution, probe, and fallback
-semantics.
-
-Global strict `fla_npu` mode currently validates every Stage 1 replacement
-symbol, including standalone prefill entries that the selected fused execution
-graph may not call. A wheel containing the fused Phase 6 symbol alone is
-therefore insufficient for strict startup.
-
-## Validation
-
-完整的 A2/A3 Docker 源码安装、FLA wheel 构建、单算子测试和
-Qwen3.6 35B DP1/TP1 启动步骤，参见
-[`Qwen3.6 35B GDN Phase6 A2/A3 部署与验证操作指南`](../../../superpowers/guides/2026-08-29-qwen-gdn-a2-a3-validation-guide-zh.md)。
-
-Install the FLA wheel built for the target SoC, then run on each device family:
-
-```bash
-cd /home/z00886386/vllm-ascend
-
-pytest -q tests/ut/device/test_device_config.py
-pytest -q tests/ut/ops/test_gdn_fla.py
-pytest -s -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_gdn_fla.py
-```
-
-Run the Qwen3.5 and Qwen3.6 eager model smokes separately. Selection logs must
-show `gdn_core_fwd_phase6` and the expected `soc` value. Any fallback or failure
-must identify the logical operator, concrete FLA symbol, stage, requested
-backend, and SoC.
-
-A2 has formal FLA Phase 6 evidence. A3 build support is not an A3 device
-acceptance claim; A3 operator and model tests remain mandatory. A5 must run the
-same regression matrix.
-
-## Compatibility
-
-The implementation lives in `vllm_ascend.ops.gdn_fla`. The former
-`vllm_ascend.ops.gdn_a5` module and A5-prefixed class names remain temporary
-import aliases. New code must use `FlaGDNAdapter` and
-`FlaGDNOperatorDispatcher`.
+See the Chinese validation guide for installation, direct Phase6 tests,
+Qwen3.6-35B comparison, logging, profiler checks, and the per-SoC result table.
