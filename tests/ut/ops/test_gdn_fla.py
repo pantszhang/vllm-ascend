@@ -319,6 +319,7 @@ def test_mixed_decode_prefill_uses_phase6_only_for_prefill():
             "vllm_ascend.ops.gdn.torch.ops._C_ascend.npu_recurrent_gated_delta_rule",
             side_effect=native_recurrent,
         ) as native_decode,
+        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda tensor: tensor),
         patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
         patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector"),
@@ -339,3 +340,99 @@ def test_mixed_decode_prefill_uses_phase6_only_for_prefill():
     native_decode.assert_called_once()
     torch.testing.assert_close(core_attn_out[0], torch.full_like(core_attn_out[0], 10))
     torch.testing.assert_close(core_attn_out[1:], torch.full_like(core_attn_out[1:], 20))
+
+
+@pytest.mark.parametrize("speculative", [False, True], ids=["ordinary-decode", "mtp-decode"])
+def test_pure_decode_never_constructs_phase6_backend(speculative):
+    layer = SimpleNamespace(
+        prefix="layers.0.linear_attn",
+        kv_cache=(torch.zeros((1, 1, 2)), torch.zeros((1, 1, 2, 2))),
+        conv1d=SimpleNamespace(weight=torch.zeros((2, 1, 2)), bias=None),
+        activation=None,
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+        rearrange_mixed_qkv=lambda value: (
+            (None, None, None)
+            if value is None
+            else (value.reshape(1, value.shape[0], 1, 2),) * 3
+        ),
+    )
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=0 if speculative else 1,
+        num_decode_tokens=0 if speculative else 1,
+        num_spec_decodes=1 if speculative else 0,
+        num_spec_decode_tokens=1 if speculative else 0,
+        num_actual_tokens=1,
+        non_spec_query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        non_spec_state_indices_tensor=torch.tensor([0], dtype=torch.int32),
+    )
+    decode_conv = SimpleNamespace(
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        cache_indices=torch.tensor([0], dtype=torch.int32),
+    )
+    if speculative:
+        decode_conv.num_accepted_tokens = torch.tensor([1], dtype=torch.int32)
+        metadata.spec_sequence_masks = torch.tensor([True])
+        metadata.spec_token_indx = torch.tensor([0], dtype=torch.int64)
+        metadata.non_spec_token_indx = torch.empty(0, dtype=torch.int64)
+        metadata.spec_state_indices_tensor = torch.tensor([[0]], dtype=torch.int32)
+        metadata.spec_decode_metadata = SimpleNamespace(
+            actual_seq_lengths=torch.tensor([1], dtype=torch.int32),
+            spec_causal_conv1d=decode_conv,
+        )
+    else:
+        metadata.non_spec_decode_metadata = SimpleNamespace(
+            actual_seq_lengths=torch.tensor([0, 1], dtype=torch.int32),
+            causal_conv1d=decode_conv,
+        )
+
+    def native_causal_conv(output, value, *_args, **_kwargs):
+        output.copy_(value)
+
+    def native_recurrent(**kwargs):
+        return torch.full_like(kwargs["value"], 7)
+
+    forward_context = ForwardContext(
+        no_compile_layers={layer.prefix: layer},
+        attn_metadata={layer.prefix: metadata},
+        slot_mapping={},
+    )
+    get_backend = MagicMock()
+    core_attn_out = torch.empty((1, 1, 2))
+    gating = (torch.zeros((1, 1, 1)), torch.zeros((1, 1, 1)))
+
+    with (
+        override_forward_context(forward_context),
+        patch.object(
+            AscendGatedDeltaNetAttention,
+            "_get_fla_gdn_prefill_backend",
+            get_backend,
+        ),
+        patch(
+            "vllm_ascend.ops.gdn.torch.ops._C_ascend.npu_causal_conv1d_custom",
+            side_effect=native_causal_conv,
+        ) as native_conv,
+        patch(
+            "vllm_ascend.ops.gdn.torch.ops._C_ascend.npu_recurrent_gated_delta_rule",
+            side_effect=native_recurrent,
+        ) as native_decode,
+        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda tensor: tensor),
+        patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
+        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector"),
+        patch("vllm_ascend.ops.gdn.record_attention_compute_start"),
+    ):
+        AscendGatedDeltaNetAttention._forward_core(
+            layer,
+            torch.zeros((1, 2)),
+            torch.zeros((1, 1)),
+            torch.zeros((1, 1)),
+            core_attn_out,
+        )
+
+    get_backend.assert_not_called()
+    native_conv.assert_called_once()
+    native_decode.assert_called_once()
+    torch.testing.assert_close(core_attn_out, torch.full_like(core_attn_out, 7))
