@@ -47,7 +47,7 @@ class TestDynamicMxQuantScaleAlg(TestBase):
         "vllm_ascend.quantization.utils.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A5),
     )
-    @patch("vllm.config.get_current_vllm_config")
+    @patch("vllm.config.get_current_vllm_config_or_none")
     def test_uses_current_vllm_config_when_config_is_omitted(self, mock_current_config, _mock_profile):
         minimax_config = self._config(None, model_type="minimax_m3")
         mock_current_config.return_value = minimax_config
@@ -70,7 +70,7 @@ class TestDynamicMxQuantScaleAlg(TestBase):
 
         self.assertEqual(get_dynamic_mx_quant_scale_alg(), 1)
 
-    @patch("vllm.config.get_current_vllm_config")
+    @patch("vllm.config.get_current_vllm_config_or_none")
     @patch("vllm.forward_context.get_forward_context")
     @patch("vllm.forward_context.is_forward_context_available", return_value=True)
     @patch(
@@ -89,6 +89,18 @@ class TestDynamicMxQuantScaleAlg(TestBase):
         mock_current_config.return_value = minimax_config
 
         self.assertEqual(get_dynamic_mx_quant_scale_alg(), 1)
+
+    @patch(
+        "vllm_ascend.quantization.utils.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    @patch("vllm.config.get_current_vllm_config_or_none", return_value=None)
+    def test_defaults_to_zero_when_all_config_context_is_missing(
+        self,
+        _mock_current_config,
+        _mock_profile,
+    ):
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(), 0)
 
 
 class TestDetectQuantizationMethod(TestBase):

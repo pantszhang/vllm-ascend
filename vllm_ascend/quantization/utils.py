@@ -64,11 +64,12 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
 
         from vllm.config import get_current_vllm_config_or_none
 
+        # This missing-context case was first observed while tracing Qwen GDN
+        # with FULL_DECODE_ONLY. The helper is shared by all A5 Dynamic MX
+        # quantization paths, so keep the fallback model-agnostic: without any
+        # config context, algorithm 0 is the safe default.
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None:
-            # No config context (e.g. while torch.compile is tracing the
-            # model forward). The MiniMax M3 special case cannot be resolved
-            # here; fall back to the default scale algorithm.
             return 0
 
     model_config = vllm_config.model_config
