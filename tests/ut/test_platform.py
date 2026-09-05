@@ -32,7 +32,7 @@ class TestFlaGDNPreload(PytestBase):
         [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5],
     )
     @pytest.mark.parametrize("backend", ["auto", "fla_npu"])
-    def test_runs_on_all_supported_accelerators(
+    def test_preloads_phase6_on_supported_accelerators(
         self, monkeypatch, device_type, backend
     ):
         """Catch regressions that restrict FLA OPP preload to A5."""
@@ -51,27 +51,6 @@ class TestFlaGDNPreload(PytestBase):
 
         assert imported_modules == ["fla_npu.ops.ascendc"]
 
-    def test_honors_fla_operator_override(self, monkeypatch):
-        """Preload FLA when an operator override opts in from native mode."""
-        imported_modules = []
-        monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "native")
-        monkeypatch.setenv(
-            "VLLM_ASCEND_GDN_OP_BACKENDS",
-            "gdn_core_fwd=fla_npu",
-        )
-        monkeypatch.setattr(
-            "vllm_ascend.device.device_config.get_ascend_device_type",
-            lambda: AscendDeviceType.A2,
-        )
-        monkeypatch.setattr(
-            "importlib.import_module",
-            lambda module_name: imported_modules.append(module_name),
-        )
-
-        _import_fla_npu_before_custom_opp()
-
-        assert imported_modules == ["fla_npu.ops.ascendc"]
-
     @pytest.mark.parametrize(
         ("device_type", "backend"),
         [
@@ -79,12 +58,11 @@ class TestFlaGDNPreload(PytestBase):
             (AscendDeviceType.A2, "native"),
         ],
     )
-    def test_skips_ineligible_configurations(
+    def test_skips_phase6_preload_for_ineligible_configurations(
         self, monkeypatch, device_type, backend
     ):
         imported_modules = []
         monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", backend)
-        monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
         monkeypatch.setattr(
             "vllm_ascend.device.device_config.get_ascend_device_type",
             lambda: device_type,
@@ -97,6 +75,40 @@ class TestFlaGDNPreload(PytestBase):
         _import_fla_npu_before_custom_opp()
 
         assert imported_modules == []
+
+    def test_auto_import_failure_logs_and_defers_to_native(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
+        monkeypatch.setattr(
+            "vllm_ascend.device.device_config.get_ascend_device_type",
+            lambda: AscendDeviceType.A2,
+        )
+        monkeypatch.setattr(
+            "importlib.import_module",
+            MagicMock(side_effect=FileNotFoundError("missing FLA OPP")),
+        )
+
+        with patch("vllm_ascend.platform.logger.warning") as warning:
+            _import_fla_npu_before_custom_opp()
+
+        warning.assert_called_once()
+        assert "FileNotFoundError" in str(warning.call_args)
+        assert "missing FLA OPP" in str(warning.call_args)
+
+    def test_strict_import_failure_is_propagated(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "fla_npu")
+        monkeypatch.setattr(
+            "vllm_ascend.device.device_config.get_ascend_device_type",
+            lambda: AscendDeviceType.A3,
+        )
+        monkeypatch.setattr(
+            "importlib.import_module",
+            MagicMock(side_effect=FileNotFoundError("missing FLA OPP")),
+        )
+
+        with pytest.raises(RuntimeError, match="strict GDN Phase6 preload") as error:
+            _import_fla_npu_before_custom_opp()
+
+        assert isinstance(error.value.__cause__, FileNotFoundError)
 
     def test_import_kernels_preloads_before_custom_opp_bootstrap(self, monkeypatch):
         from vllm_ascend import platform

@@ -81,21 +81,14 @@ def _import_fla_npu_before_custom_opp() -> None:
 
     fla_npu's direct runtime prepends its own OPP vendor dirs to
     ASCEND_CUSTOM_OPP_PATH at import time. If the import happens after the
-    kernel manager has already indexed the custom-op environment, fla
-    operator lookups fail (observed on A5: solve_tri 161001 and
-    gdn_core_fwd 169112 "dynamic shape JSON config cannot be found").
-    Importing it first keeps the search path complete from the start.
+    kernel manager has already indexed the custom-op environment, Phase6
+    operator lookup may fail. Importing it first ensures that both the FLA
+    and vLLM-Ascend custom OPP sets are visible before kernel-manager indexing.
     """
     import os
 
     backend = os.environ.get("VLLM_ASCEND_GDN_BACKEND", "auto").strip().lower()
-    operator_overrides = os.environ.get("VLLM_ASCEND_GDN_OP_BACKENDS", "")
-    fla_override_requested = any(
-        entry.count("=") == 1
-        and entry.split("=", 1)[1].strip().lower() == "fla_npu"
-        for entry in operator_overrides.split(",")
-    )
-    if backend == "native" and not fla_override_requested:
+    if backend == "native":
         return
     try:
         from vllm_ascend.device.device_config import is_fla_gdn_supported
@@ -108,9 +101,13 @@ def _import_fla_npu_before_custom_opp() -> None:
         import importlib
 
         importlib.import_module("fla_npu.ops.ascendc")
-    except ImportError as exc:
+    except Exception as exc:
+        if backend == "fla_npu":
+            raise RuntimeError("fla_npu import failed during strict GDN Phase6 preload") from exc
         logger.warning(
-            "fla_npu is not importable; GDN fla paths will fall back to native: %s", exc
+            "fla_npu preload failed; GDN Phase6 auto mode will use native prefill: %s: %s",
+            type(exc).__name__,
+            str(exc).splitlines()[0],
         )
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_REDUCED_CAPTURE_SIZES = 4
