@@ -28,6 +28,10 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -46,6 +50,29 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+
+
+# ---- 临时 debug dump（定位完成后删除）----
+_GDN_DUMP_DIR = "/home/z00886386/templog/gdn_dump"
+_GDN_DUMP_DONE: dict[str, bool] = {}
+
+
+def _dump_gdn_debug_once(tag: str, **tensors) -> None:
+    """每个进程每个 tag 只落盘一次，避免多请求/多层重复写。"""
+    if _GDN_DUMP_DONE.get(tag, False):
+        return
+    _GDN_DUMP_DONE[tag] = True
+    import os
+
+    import torch.distributed as dist
+
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    os.makedirs(_GDN_DUMP_DIR, exist_ok=True)
+    torch.save(
+        {name: value.cpu() for name, value in tensors.items()},
+        os.path.join(_GDN_DUMP_DIR, f"gdn_{tag}_rank{rank}.pt"),
+    )
+    logger.info("[gdn dump] saved tag=%s rank=%s to %s", tag, rank, _GDN_DUMP_DIR)
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -163,6 +190,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             o: ``[1, T, Nv, Dv]`` and final_state: ``[N, Nv, Dv, Dk]``.
         """
         # TND layout: drop the leading batch dim (batch size is always 1 here).
+        logger.info("way aaaa")
+        logger.info("q=%s",q)
+        logger.info("k=%s",k)   
         q = l2norm_fwd(q).squeeze(0).contiguous()  # [T, Nk, Dk]
         k = l2norm_fwd(k).squeeze(0).contiguous()  # [T, Nk, Dk]
         v = v.squeeze(0).contiguous()  # [T, Nv, Dv]
@@ -582,6 +612,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ),
                 )
                 ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+                # ---- 临时 debug dump：FLA 融合分支，只保存一次 ----
+                _dump_gdn_debug_once(
+                    "fla",
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state_v_first=initial_state,
+                    initial_state_k_first=initial_state.transpose(-1, -2).contiguous(),
+                    core_attn_out=core_attn_out_non_spec,
+                    last_recurrent_state=last_recurrent_state,
+                )
             elif AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1:
                 # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
                 # directly, so no transpose is needed. Advanced indexing already
@@ -619,6 +662,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
                 ssm_state[prefill_state_indices] = (
                     last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                )
+                # ---- 临时 debug dump：triton 分立链分支，只保存一次 ----
+                _dump_gdn_debug_once(
+                    "native_chain",
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state_v_first=initial_state.transpose(-1, -2).contiguous(),
+                    initial_state_k_first=initial_state,
+                    core_attn_out=core_attn_out_non_spec,
+                    last_recurrent_state=last_recurrent_state,
                 )
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(

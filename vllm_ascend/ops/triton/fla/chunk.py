@@ -16,6 +16,10 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.third_party.flash_linear_attention.ops.utils import SUPPRESS_LEVEL
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
 from .chunk_o import chunk_fwd_o  # noqa: F401
@@ -366,6 +370,10 @@ def chunk_gated_delta_rule(
                 f"chunk_gated_delta_rule: The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
+    logger.info("chunk.py")
+    logger.info("q=%s",q)
+    logger.info("k=%s",k)
+    logger.info("v=%s",v)
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = ChunkGatedDeltaRuleFunction.apply(

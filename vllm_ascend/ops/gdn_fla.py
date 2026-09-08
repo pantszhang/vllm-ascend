@@ -379,7 +379,31 @@ class FlaGDNPrefillBackend:
         state[~has_initial_state, ...] = 0
         cu_seqlens = metadata.cu_seqlens_host
         chunk_indices = metadata.chunk_indices_host
+        logger.info(
+            "[GDN FLA][prefill] calling operator: "
+            "symbol=%s callable=%s layer=%s inputs=%s",
+            self.symbol,
+            getattr(
+                self._operator,
+                "__qualname__",
+                getattr(self._operator, "__name__", repr(self._operator)),
+            ),
+            self.layer_name,
+            _tensor_call_metadata(
+                (q, k, v, g, beta),
+                {
+                    "initial_state": state,
+                    "cu_seqlens": cu_seqlens,
+                    "chunk_indices": chunk_indices,
+                },
+            ),
+        )   
 
+        logger.info("fla")
+        logger.info("q=%s",q)
+        logger.info("k=%s",k)
+        logger.info("v=%s",v)
+        
         try:
             output, final_state, _, _ = self._operator(
                 q,
@@ -399,7 +423,7 @@ class FlaGDNPrefillBackend:
                 use_beta_sigmoid_in_kernel=False,
                 allow_neg_eigval=False,
                 output_a=False,
-                state_v_first=False,
+                state_v_first=True,
                 layout="BSND",
             )
         except Exception:
