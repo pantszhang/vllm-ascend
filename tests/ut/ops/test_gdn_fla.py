@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit coverage for the Phase6-only FLA GDN prefill backend."""
+"""Unit coverage for the A5 FLA GDN prefill backend."""
 
 import dataclasses
 from types import SimpleNamespace
@@ -12,15 +12,15 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.ops.gdn_fla import (
-    FlaGDNPhase6Backend,
+    FlaGDNPrefillBackend,
     GDNBackendMode,
-    GDNPhase6PrefillMetadata,
-    GDNPhase6RuntimeSignature,
+    GDNPrefillMetadata,
+    GDNRuntimeSignature,
     parse_gdn_backend_mode,
 )
 
 
-SIGNATURE = GDNPhase6RuntimeSignature(
+SIGNATURE = GDNRuntimeSignature(
     soc="ascend950",
     dtype="bfloat16",
     state_dtype="float32",
@@ -33,10 +33,10 @@ SIGNATURE = GDNPhase6RuntimeSignature(
 
 
 @pytest.fixture(autouse=True)
-def clear_phase6_process_caches():
-    FlaGDNPhase6Backend.clear_process_caches_for_test()
+def clear_gdn_fla_process_caches():
+    FlaGDNPrefillBackend.clear_process_caches_for_test()
     yield
-    FlaGDNPhase6Backend.clear_process_caches_for_test()
+    FlaGDNPrefillBackend.clear_process_caches_for_test()
 
 
 @pytest.mark.parametrize(
@@ -58,9 +58,9 @@ def test_parse_gdn_backend_mode_rejects_invalid_values(value):
         parse_gdn_backend_mode(value)
 
 
-def _fake_phase6_outputs(tokens=64, sequences=1):
+def _fake_fla_outputs(tokens=64, sequences=1):
     return (
-        torch.zeros((1, 2, tokens, 128), dtype=torch.bfloat16),
+        torch.zeros((1, tokens, 2, 128), dtype=torch.bfloat16),
         torch.zeros((sequences, 2, 128, 128), dtype=torch.float32),
         torch.zeros((1, tokens, 2), dtype=torch.float32),
         torch.zeros((1, 2, tokens, 64), dtype=torch.bfloat16),
@@ -68,7 +68,7 @@ def _fake_phase6_outputs(tokens=64, sequences=1):
 
 
 def _backend(mode):
-    backend = FlaGDNPhase6Backend.create(
+    backend = FlaGDNPrefillBackend.create(
         mode=mode,
         signature=SIGNATURE,
         layer_name="model.layers.0.linear_attn",
@@ -88,28 +88,74 @@ def _prefill_inputs(tokens=65):
         "initial_state": torch.zeros((2, 2, 128, 128), dtype=torch.float32),
         "has_initial_state": torch.tensor([False, True]),
         "scale": 128**-0.5,
-        "metadata": GDNPhase6PrefillMetadata(
+        "metadata": GDNPrefillMetadata(
             cu_seqlens_host=(0, 1, tokens),
             chunk_indices_host=(0, 0, 1, 0),
         ),
     }
 
 
-@pytest.mark.parametrize("soc", ["ascend910b", "ascend910_93", "ascend950"])
-def test_phase6_backend_accepts_a2_a3_a5(soc):
-    backend = FlaGDNPhase6Backend.create(
+def test_fla_backend_accepts_a5():
+    backend = FlaGDNPrefillBackend.create(
         mode="auto",
-        signature=dataclasses.replace(SIGNATURE, soc=soc),
+        signature=SIGNATURE,
         layer_name="model.layers.0.linear_attn",
         pcp_world_size=1,
     )
     assert backend is not None
 
 
-def test_phase6_backend_native_does_not_resolve_fla(monkeypatch):
+@pytest.mark.parametrize("soc", ["ascend910b", "ascend910_93"])
+def test_fla_backend_auto_uses_native_for_a2_a3(soc):
+    signature = dataclasses.replace(SIGNATURE, soc=soc)
+    assert (
+        FlaGDNPrefillBackend.create(
+            mode="auto",
+            signature=signature,
+            layer_name="model.layers.0.linear_attn",
+            pcp_world_size=1,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("soc", ["ascend910b", "ascend910_93"])
+def test_fla_backend_strict_rejects_a2_a3(soc):
+    signature = dataclasses.replace(SIGNATURE, soc=soc)
+    with pytest.raises(RuntimeError, match="unsupported SoC"):
+        FlaGDNPrefillBackend.create(
+            mode="fla_npu",
+            signature=signature,
+            layer_name="model.layers.0.linear_attn",
+            pcp_world_size=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        dataclasses.replace(SIGNATURE, value_dim=256),
+        dataclasses.replace(SIGNATURE, num_value_heads=5),
+        dataclasses.replace(SIGNATURE, chunk_size=128),
+    ],
+    ids=["value-dim", "gva-ratio", "chunk-size"],
+)
+def test_fla_backend_auto_uses_native_outside_pr472_contract(signature):
+    assert (
+        FlaGDNPrefillBackend.create(
+            mode="auto",
+            signature=signature,
+            layer_name="model.layers.0.linear_attn",
+            pcp_world_size=1,
+        )
+        is None
+    )
+
+
+def test_fla_backend_native_does_not_resolve_fla(monkeypatch):
     resolver = MagicMock()
-    monkeypatch.setattr("vllm_ascend.ops.gdn_fla.resolve_gdn_core_fwd_phase6", resolver)
-    backend = FlaGDNPhase6Backend.create(
+    monkeypatch.setattr("vllm_ascend.ops.gdn_fla.resolve_chunk_gated_delta_rule_fwd", resolver)
+    backend = FlaGDNPrefillBackend.create(
         mode="native",
         signature=SIGNATURE,
         layer_name="model.layers.0.linear_attn",
@@ -119,9 +165,9 @@ def test_phase6_backend_native_does_not_resolve_fla(monkeypatch):
     resolver.assert_not_called()
 
 
-def test_phase6_backend_auto_uses_native_for_pcp():
+def test_fla_backend_auto_uses_native_for_pcp():
     with patch("vllm_ascend.ops.gdn_fla.logger.info") as info:
-        backend = FlaGDNPhase6Backend.create(
+        backend = FlaGDNPrefillBackend.create(
             mode="auto",
             signature=SIGNATURE,
             layer_name="model.layers.0.linear_attn",
@@ -131,9 +177,9 @@ def test_phase6_backend_auto_uses_native_for_pcp():
     assert "pcp_world_size=2" in str(info.call_args)
 
 
-def test_phase6_backend_strict_rejects_pcp():
+def test_fla_backend_strict_rejects_pcp():
     with pytest.raises(RuntimeError, match="PCP world size 1"):
-        FlaGDNPhase6Backend.create(
+        FlaGDNPrefillBackend.create(
             mode="fla_npu",
             signature=SIGNATURE,
             layer_name="model.layers.0.linear_attn",
@@ -143,7 +189,7 @@ def test_phase6_backend_strict_rejects_pcp():
 
 def test_auto_resolve_failure_returns_native(monkeypatch):
     monkeypatch.setattr(
-        "vllm_ascend.ops.gdn_fla.resolve_gdn_core_fwd_phase6",
+        "vllm_ascend.ops.gdn_fla.resolve_chunk_gated_delta_rule_fwd",
         MagicMock(side_effect=ImportError("missing fla_npu")),
     )
     assert _backend("auto").prepare(torch.device("cpu")) is False
@@ -151,7 +197,7 @@ def test_auto_resolve_failure_returns_native(monkeypatch):
 
 def test_strict_resolve_failure_raises(monkeypatch):
     monkeypatch.setattr(
-        "vllm_ascend.ops.gdn_fla.resolve_gdn_core_fwd_phase6",
+        "vllm_ascend.ops.gdn_fla.resolve_chunk_gated_delta_rule_fwd",
         MagicMock(side_effect=ImportError("missing fla_npu")),
     )
     with pytest.raises(RuntimeError, match="resolve"):
@@ -159,10 +205,10 @@ def test_strict_resolve_failure_raises(monkeypatch):
 
 
 def test_scratch_probe_runs_once_per_device_and_signature(monkeypatch):
-    raw = MagicMock(return_value=_fake_phase6_outputs())
+    raw = MagicMock(return_value=_fake_fla_outputs())
     monkeypatch.setattr(
-        "vllm_ascend.ops.gdn_fla.resolve_gdn_core_fwd_phase6",
-        lambda: (raw, "fla_npu.ops.ascendc.gdn_core_fwd_phase6"),
+        "vllm_ascend.ops.gdn_fla.resolve_chunk_gated_delta_rule_fwd",
+        lambda: (raw, "fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd"),
     )
     first = _backend("auto")
     second = _backend("auto")
@@ -171,11 +217,10 @@ def test_scratch_probe_runs_once_per_device_and_signature(monkeypatch):
     assert raw.call_count == 1
 
 
-def test_prefill_normalizes_phase6_layout_and_metadata(monkeypatch):
+def test_prefill_uses_a5_prepare_pipeline_contract(monkeypatch):
     captured = {}
-    monkeypatch.setattr("vllm_ascend.ops.gdn_fla.l2norm_fwd", lambda tensor: tensor)
 
-    def fake_phase6(q, k, v, g, beta, **kwargs):
+    def fake_fla(q, k, v, g, beta, **kwargs):
         captured.update(
             q=q,
             k=k,
@@ -185,41 +230,49 @@ def test_prefill_normalizes_phase6_layout_and_metadata(monkeypatch):
             initial_state=kwargs["initial_state"],
             cu_seqlens=kwargs["cu_seqlens"],
             chunk_indices=kwargs["chunk_indices"],
+            options=kwargs,
         )
         return (
-            torch.zeros((q.shape[0], v.shape[1], q.shape[2], v.shape[3]), dtype=q.dtype),
+            torch.zeros((q.shape[0], q.shape[1], v.shape[2], v.shape[3]), dtype=q.dtype),
             torch.zeros_like(kwargs["initial_state"]),
             torch.zeros_like(g),
-            torch.zeros((q.shape[0], v.shape[1], q.shape[2], 64), dtype=torch.float32),
+            torch.zeros((q.shape[0], v.shape[2], q.shape[1], 64), dtype=q.dtype),
         )
 
-    raw = MagicMock(side_effect=fake_phase6)
+    raw = MagicMock(side_effect=fake_fla)
     monkeypatch.setattr(
-        "vllm_ascend.ops.gdn_fla.resolve_gdn_core_fwd_phase6",
-        lambda: (raw, "fla_npu.ops.ascendc.gdn_core_fwd_phase6"),
+        "vllm_ascend.ops.gdn_fla.resolve_chunk_gated_delta_rule_fwd",
+        lambda: (raw, "fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd"),
     )
     backend = _backend("fla_npu")
     assert backend.prepare(torch.device("cpu")) is True
     captured.clear()
     output, final_state = backend.prefill(**_prefill_inputs())
 
-    assert captured["q"].shape == (1, 1, 65, 128)
-    assert captured["k"].shape == (1, 1, 65, 128)
-    assert captured["v"].shape == (1, 2, 65, 128)
-    assert captured["beta"].dtype == torch.float32
+    assert captured["q"].shape == (1, 65, 1, 128)
+    assert captured["k"].shape == (1, 65, 1, 128)
+    assert captured["v"].shape == (1, 65, 2, 128)
+    assert captured["beta"].dtype == torch.bfloat16
     assert captured["initial_state"].shape == (2, 2, 128, 128)
-    assert captured["cu_seqlens"] == [0, 1, 65]
-    assert captured["chunk_indices"] == [0, 0, 1, 0]
+    assert captured["cu_seqlens"] == (0, 1, 65)
+    assert captured["chunk_indices"] == (0, 0, 1, 0)
+    assert captured["options"]["use_exp2"] is True
+    assert captured["options"]["use_qk_l2norm_in_kernel"] is True
+    assert captured["options"]["use_gate_in_kernel"] is False
+    assert captured["options"]["use_beta_sigmoid_in_kernel"] is False
+    assert captured["options"]["allow_neg_eigval"] is False
+    assert captured["options"]["output_a"] is False
+    assert captured["options"]["state_v_first"] is True
+    assert captured["options"]["layout"] == "BSND"
     assert output.shape == (1, 65, 2, 128)
     assert final_state.shape == (2, 2, 128, 128)
 
 
-def test_live_phase6_failure_is_logged_and_propagated(monkeypatch):
-    monkeypatch.setattr("vllm_ascend.ops.gdn_fla.l2norm_fwd", lambda tensor: tensor)
-    raw = MagicMock(side_effect=[_fake_phase6_outputs(), RuntimeError("device execution failed")])
+def test_live_fla_failure_is_logged_and_propagated(monkeypatch):
+    raw = MagicMock(side_effect=[_fake_fla_outputs(), RuntimeError("device execution failed")])
     monkeypatch.setattr(
-        "vllm_ascend.ops.gdn_fla.resolve_gdn_core_fwd_phase6",
-        lambda: (raw, "fla_npu.ops.ascendc.gdn_core_fwd_phase6"),
+        "vllm_ascend.ops.gdn_fla.resolve_chunk_gated_delta_rule_fwd",
+        lambda: (raw, "fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd"),
     )
     backend = _backend("auto")
     assert backend.prepare(torch.device("cpu")) is True
@@ -231,7 +284,7 @@ def test_live_phase6_failure_is_logged_and_propagated(monkeypatch):
     assert raw.call_count == 2
 
 
-def test_mixed_decode_prefill_uses_phase6_only_for_prefill():
+def test_mixed_decode_prefill_uses_fla_only_for_prefill():
     conv_state = torch.zeros((3, 1, 2))
     ssm_state = torch.zeros((2, 1, 2, 2))
 
@@ -279,7 +332,7 @@ def test_mixed_decode_prefill_uses_phase6_only_for_prefill():
     metadata.non_spec_decode_metadata = SimpleNamespace(
         actual_seq_lengths=torch.tensor([0, 1], dtype=torch.int32),
     )
-    phase6_backend = SimpleNamespace(
+    fla_backend = SimpleNamespace(
         prepare=MagicMock(return_value=True),
         prefill=MagicMock(
             side_effect=lambda **kwargs: (
@@ -309,7 +362,7 @@ def test_mixed_decode_prefill_uses_phase6_only_for_prefill():
         patch.object(
             AscendGatedDeltaNetAttention,
             "_get_fla_gdn_prefill_backend",
-            return_value=phase6_backend,
+            return_value=fla_backend,
         ) as get_backend,
         patch(
             "vllm_ascend.ops.gdn.torch.ops._C_ascend.npu_causal_conv1d_custom",
@@ -334,8 +387,8 @@ def test_mixed_decode_prefill_uses_phase6_only_for_prefill():
         )
 
     get_backend.assert_called_once()
-    phase6_backend.prepare.assert_called_once()
-    phase6_backend.prefill.assert_called_once()
+    fla_backend.prepare.assert_called_once()
+    fla_backend.prefill.assert_called_once()
     native_conv.assert_called_once()
     native_decode.assert_called_once()
     torch.testing.assert_close(core_attn_out[0], torch.full_like(core_attn_out[0], 10))
@@ -343,7 +396,7 @@ def test_mixed_decode_prefill_uses_phase6_only_for_prefill():
 
 
 @pytest.mark.parametrize("speculative", [False, True], ids=["ordinary-decode", "mtp-decode"])
-def test_pure_decode_never_constructs_phase6_backend(speculative):
+def test_pure_decode_never_constructs_fla_prefill_backend(speculative):
     layer = SimpleNamespace(
         prefix="layers.0.linear_attn",
         kv_cache=(torch.zeros((1, 1, 2)), torch.zeros((1, 1, 2, 2))),

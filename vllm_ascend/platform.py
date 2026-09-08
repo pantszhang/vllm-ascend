@@ -81,7 +81,7 @@ def _import_fla_npu_before_custom_opp() -> None:
 
     fla_npu's direct runtime prepends its own OPP vendor dirs to
     ASCEND_CUSTOM_OPP_PATH at import time. If the import happens after the
-    kernel manager has already indexed the custom-op environment, Phase6
+    kernel manager has already indexed the custom-op environment, A5 GDN
     operator lookup may fail. Importing it first ensures that both the FLA
     and vLLM-Ascend custom OPP sets are visible before kernel-manager indexing.
     """
@@ -103,9 +103,9 @@ def _import_fla_npu_before_custom_opp() -> None:
         importlib.import_module("fla_npu.ops.ascendc")
     except Exception as exc:
         if backend == "fla_npu":
-            raise RuntimeError("fla_npu import failed during strict GDN Phase6 preload") from exc
+            raise RuntimeError("fla_npu import failed during strict A5 GDN preload") from exc
         logger.warning(
-            "fla_npu preload failed; GDN Phase6 auto mode will use native prefill: %s: %s",
+            "fla_npu preload failed; A5 GDN auto mode will use native prefill: %s: %s",
             type(exc).__name__,
             str(exc).splitlines()[0],
         )

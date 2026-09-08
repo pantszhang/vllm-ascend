@@ -37,9 +37,9 @@ from vllm_ascend.device.device_config import get_fla_gdn_soc
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_fla import (
-    FlaGDNPhase6Backend,
-    GDNPhase6PrefillMetadata,
-    GDNPhase6RuntimeSignature,
+    FlaGDNPrefillBackend,
+    GDNPrefillMetadata,
+    GDNRuntimeSignature,
 )
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
@@ -57,9 +57,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         activation: torch.Tensor,
         state: torch.Tensor,
-    ) -> FlaGDNPhase6Backend | None:
+    ) -> FlaGDNPrefillBackend | None:
         soc = get_fla_gdn_soc()
-        signature = GDNPhase6RuntimeSignature(
+        signature = GDNRuntimeSignature(
             soc=soc or "unsupported",
             dtype=str(activation.dtype).removeprefix("torch."),
             state_dtype=str(state.dtype).removeprefix("torch."),
@@ -70,18 +70,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         pcp_world_size = get_pcp_group().world_size
         cache_key = (ascend_envs.VLLM_ASCEND_GDN_BACKEND, signature, pcp_world_size)
-        cached = getattr(self, "_fla_gdn_phase6_backend_cache", None)
+        cached = getattr(self, "_fla_gdn_prefill_backend_cache", None)
         if cached is None or cached[0] != cache_key:
             cached = (
                 cache_key,
-                FlaGDNPhase6Backend.create(
+                FlaGDNPrefillBackend.create(
                     mode=ascend_envs.VLLM_ASCEND_GDN_BACKEND,
                     signature=signature,
                     layer_name=self.prefix,
                     pcp_world_size=pcp_world_size,
                 ),
             )
-            self._fla_gdn_phase6_backend_cache = cached
+            self._fla_gdn_prefill_backend_cache = cached
         return cached[1]
 
     @classmethod
@@ -559,15 +559,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            phase6_backend = AscendGatedDeltaNetAttention._get_fla_gdn_prefill_backend(
+            fla_backend = AscendGatedDeltaNetAttention._get_fla_gdn_prefill_backend(
                 self, query_non_spec, ssm_state
             )
-            use_phase6 = phase6_backend is not None and phase6_backend.prepare(query_non_spec.device)
-            if use_phase6:
-                assert phase6_backend is not None
+            use_fla = fla_backend is not None and fla_backend.prepare(query_non_spec.device)
+            if use_fla:
+                assert fla_backend is not None
                 chunk_meta = attn_metadata.non_spec_prefill_metadata.chunk
                 initial_state = ssm_state[prefill_state_indices]
-                core_attn_out_non_spec, last_recurrent_state = phase6_backend.prefill(
+                core_attn_out_non_spec, last_recurrent_state = fla_backend.prefill(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
@@ -576,9 +576,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     initial_state=initial_state,
                     has_initial_state=prefill_has_initial_state,
                     scale=key_non_spec.shape[-1] ** -0.5,
-                    metadata=GDNPhase6PrefillMetadata(
-                        cu_seqlens_host=tuple(chunk_meta.cu_seqlens_host),
-                        chunk_indices_host=tuple(chunk_meta.chunk_indices_chunk64_host),
+                    metadata=GDNPrefillMetadata(
+                        cu_seqlens_host=chunk_meta.cu_seqlens_host,
+                        chunk_indices_host=chunk_meta.chunk_indices_chunk64_host,
                     ),
                 )
                 ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)

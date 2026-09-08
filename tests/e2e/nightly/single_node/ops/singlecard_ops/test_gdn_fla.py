@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Real-NPU comparison for the Phase6-only FLA GDN prefill backend."""
+"""Real-NPU comparison for the A5 FLA GDN prefill backend."""
 
 import pytest
 import torch
@@ -8,15 +8,15 @@ import torch_npu
 
 from vllm_ascend.device.device_config import get_fla_gdn_soc, is_fla_gdn_supported
 from vllm_ascend.ops.gdn_fla import (
-    FlaGDNPhase6Backend,
-    GDNPhase6PrefillMetadata,
-    GDNPhase6RuntimeSignature,
+    FlaGDNPrefillBackend,
+    GDNPrefillMetadata,
+    GDNRuntimeSignature,
 )
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states, prepare_chunk_indices
 
 pytestmark = pytest.mark.skipif(
-    not is_fla_gdn_supported(), reason="requires A2/A3/A5 FLA GDN support"
+    not is_fla_gdn_supported(), reason="requires A5 FLA GDN support"
 )
 torch_npu.npu.set_compile_mode(jit_compile=False)
 
@@ -27,10 +27,10 @@ _VALUE_HEADS = 2
 _CHUNK_SIZE = 64
 
 
-def _metadata(cu_seqlens_host: tuple[int, ...]) -> GDNPhase6PrefillMetadata:
+def _metadata(cu_seqlens_host: tuple[int, ...]) -> GDNPrefillMetadata:
     cu_seqlens = torch.tensor(cu_seqlens_host, dtype=torch.int64)
     chunk_indices = prepare_chunk_indices(cu_seqlens, _CHUNK_SIZE)
-    return GDNPhase6PrefillMetadata(
+    return GDNPrefillMetadata(
         cu_seqlens_host=cu_seqlens_host,
         chunk_indices_host=tuple(int(value) for value in chunk_indices.flatten().tolist()),
     )
@@ -106,12 +106,12 @@ def _native_prefill(
     return output, final_state.transpose(-1, -2).contiguous()
 
 
-def _phase6_backend() -> FlaGDNPhase6Backend:
+def _fla_backend() -> FlaGDNPrefillBackend:
     soc = get_fla_gdn_soc()
     assert soc is not None
-    backend = FlaGDNPhase6Backend.create(
+    backend = FlaGDNPrefillBackend.create(
         mode="fla_npu",
-        signature=GDNPhase6RuntimeSignature(
+        signature=GDNRuntimeSignature(
             soc=soc,
             dtype="bfloat16",
             state_dtype="float32",
@@ -128,10 +128,10 @@ def _phase6_backend() -> FlaGDNPhase6Backend:
     return backend
 
 
-def _assert_phase6_matches_native(cu_seqlens_host: tuple[int, ...]) -> None:
+def _assert_fla_matches_native(cu_seqlens_host: tuple[int, ...]) -> None:
     inputs = _prefill_inputs(cu_seqlens_host)
     expected_output, expected_state = _native_prefill(**inputs)
-    backend = _phase6_backend()
+    backend = _fla_backend()
     assert backend.prepare(inputs["q"].device)
     actual_output, actual_state = backend.prefill(**inputs)
     torch.npu.synchronize()
@@ -149,9 +149,9 @@ def _assert_phase6_matches_native(cu_seqlens_host: tuple[int, ...]) -> None:
 
 
 @pytest.mark.parametrize("tokens", [1, 63, 64, 65])
-def test_gdn_phase6_prefill_matches_native(tokens):
-    _assert_phase6_matches_native((0, tokens))
+def test_gdn_fla_prefill_matches_native(tokens):
+    _assert_fla_matches_native((0, tokens))
 
 
-def test_gdn_phase6_varlen_prefill_matches_native():
-    _assert_phase6_matches_native((0, 1, 65))
+def test_gdn_fla_varlen_prefill_matches_native():
+    _assert_fla_matches_native((0, 1, 65))

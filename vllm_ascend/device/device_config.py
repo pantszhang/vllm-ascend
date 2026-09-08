@@ -55,20 +55,18 @@ def get_ascend_device_type() -> AscendDeviceType:
 
 
 _FLA_GDN_SOC_BY_DEVICE_TYPE = {
-    AscendDeviceType.A2: "ascend910b",
-    AscendDeviceType.A3: "ascend910_93",
     AscendDeviceType.A5: "ascend950",
 }
 
 
 def get_fla_gdn_soc() -> str | None:
-    """Return the FLA build target for hardware that supports the GDN operators."""
+    """Return the FLA build target for the currently supported A5 GDN path."""
 
     return _FLA_GDN_SOC_BY_DEVICE_TYPE.get(get_ascend_device_type())
 
 
 def is_fla_gdn_supported() -> bool:
-    """Whether the current hardware family supports the shared FLA GDN path."""
+    """Whether the current hardware family supports the A5 FLA GDN path."""
 
     return get_fla_gdn_soc() is not None
 

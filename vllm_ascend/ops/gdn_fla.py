@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Phase6-only FLA backend for Qwen GDN prefill on Ascend."""
+"""A5 FLA backend for Qwen GDN prefill on Ascend."""
 
 from __future__ import annotations
 
@@ -10,19 +10,19 @@ from typing import Any, Callable, ClassVar, Self
 
 import torch
 from vllm.logger import init_logger
-from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 logger = init_logger(__name__)
 
-GDN_PHASE6_SYMBOL = "fla_npu.ops.ascendc.gdn_core_fwd_phase6"
-_GDN_PHASE6_MODULE = "fla_npu.ops.ascendc"
-_GDN_PHASE6_ATTRIBUTE = "gdn_core_fwd_phase6"
-_SUPPORTED_SOCS = frozenset({"ascend910b", "ascend910_93", "ascend950"})
+GDN_FWD_SYMBOL = "fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd"
+_GDN_FWD_MODULE = "fla_npu.ops.ascendc"
+_GDN_FWD_ATTRIBUTE = "chunk_gated_delta_rule_fwd"
+_SUPPORTED_SOCS = frozenset({"ascend950"})
 _SUPPORTED_STATE_DTYPES = frozenset({"bfloat16", "float32"})
 _GDN_ACTIVATION_DTYPE = "bfloat16"
 _GDN_KEY_DIM = 128
-_GDN_VALUE_DIMS = frozenset({128, 256})
+_GDN_VALUE_DIM = 128
 _GDN_CHUNK_SIZE = 64
+_MAX_GVA_RATIO = 4
 _SCRATCH_TOKENS = 64
 
 
@@ -41,7 +41,7 @@ def parse_gdn_backend_mode(value: str) -> GDNBackendMode:
 
 
 @dataclass(frozen=True)
-class GDNPhase6RuntimeSignature:
+class GDNRuntimeSignature:
     soc: str
     dtype: str
     state_dtype: str
@@ -53,7 +53,7 @@ class GDNPhase6RuntimeSignature:
 
 
 @dataclass(frozen=True)
-class GDNPhase6PrefillMetadata:
+class GDNPrefillMetadata:
     cu_seqlens_host: tuple[int, ...]
     chunk_indices_host: tuple[int, ...]
 
@@ -68,9 +68,9 @@ class _PreparationResult:
     reason: str | None = None
 
 
-def resolve_gdn_core_fwd_phase6() -> tuple[Callable[..., Any], str]:
-    module = importlib.import_module(_GDN_PHASE6_MODULE)
-    return getattr(module, _GDN_PHASE6_ATTRIBUTE), GDN_PHASE6_SYMBOL
+def resolve_chunk_gated_delta_rule_fwd() -> tuple[Callable[..., Any], str]:
+    module = importlib.import_module(_GDN_FWD_MODULE)
+    return getattr(module, _GDN_FWD_ATTRIBUTE), GDN_FWD_SYMBOL
 
 
 def _first_line(exc: BaseException) -> str:
@@ -96,17 +96,17 @@ def _tensor_call_metadata(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
     return "; ".join(metadata)
 
 
-class FlaGDNPhase6Backend:
-    """Validated access to the FLA Phase6 fused GDN prefill operator.
+class FlaGDNPrefillBackend:
+    """Validated access to the FLA A5 GDN prefill pipeline.
 
     ``auto`` may choose the unchanged vLLM-Ascend prefill path before a live
-    request reaches Phase6. Once a real Phase6 call starts, errors are logged
+    request reaches FLA. Once a real FLA call starts, errors are logged
     and propagated instead of retrying the stateful request with another
     backend.
     """
 
     _preparation_results: ClassVar[
-        dict[tuple[GDNPhase6RuntimeSignature, str, int | None], _PreparationResult]
+        dict[tuple[GDNRuntimeSignature, str, int | None], _PreparationResult]
     ] = {}
     _logged_decisions: ClassVar[set[tuple[Any, ...]]] = set()
 
@@ -114,7 +114,7 @@ class FlaGDNPhase6Backend:
         self,
         *,
         mode: GDNBackendMode,
-        signature: GDNPhase6RuntimeSignature,
+        signature: GDNRuntimeSignature,
         layer_name: str,
         pcp_world_size: int,
     ) -> None:
@@ -130,7 +130,7 @@ class FlaGDNPhase6Backend:
         cls,
         *,
         mode: str | GDNBackendMode,
-        signature: GDNPhase6RuntimeSignature,
+        signature: GDNRuntimeSignature,
         layer_name: str,
         pcp_world_size: int,
     ) -> Self | None:
@@ -142,14 +142,14 @@ class FlaGDNPhase6Backend:
         if reason is not None:
             if parsed_mode is GDNBackendMode.FLA_NPU:
                 raise RuntimeError(
-                    "GDN Phase6 strict fla_npu selection failed during eligibility: "
+                    "A5 GDN strict fla_npu selection failed during eligibility: "
                     f"{reason}; soc={signature.soc} pcp_world_size={pcp_world_size} "
                     f"dtype={signature.dtype} state_dtype={signature.state_dtype}"
                 )
             cls._log_once(
                 ("eligibility", signature, pcp_world_size),
                 logger.info,
-                "GDN Phase6 selection: backend=native requested=auto stage=eligibility "
+                "A5 GDN selection: backend=native requested=auto stage=eligibility "
                 "reason=%s soc=%s pcp_world_size=%s dtype=%s state_dtype=%s layer=%s",
                 reason,
                 signature.soc,
@@ -169,7 +169,7 @@ class FlaGDNPhase6Backend:
 
     @staticmethod
     def _eligibility_failure(
-        signature: GDNPhase6RuntimeSignature,
+        signature: GDNRuntimeSignature,
         pcp_world_size: int,
     ) -> str | None:
         if signature.soc not in _SUPPORTED_SOCS:
@@ -186,8 +186,11 @@ class FlaGDNPhase6Backend:
             return "value head count must be divisible by key head count"
         if signature.key_dim != _GDN_KEY_DIM:
             return f"requires key dimension {_GDN_KEY_DIM}, got {signature.key_dim}"
-        if signature.value_dim not in _GDN_VALUE_DIMS:
-            return f"requires value dimension in {sorted(_GDN_VALUE_DIMS)}, got {signature.value_dim}"
+        if signature.value_dim != _GDN_VALUE_DIM:
+            return f"requires value dimension {_GDN_VALUE_DIM}, got {signature.value_dim}"
+        gva_ratio = signature.num_value_heads // signature.num_key_heads
+        if gva_ratio > _MAX_GVA_RATIO:
+            return f"requires GVA ratio <= {_MAX_GVA_RATIO}, got {gva_ratio}"
         if signature.chunk_size != _GDN_CHUNK_SIZE:
             return f"requires chunk size {_GDN_CHUNK_SIZE}, got {signature.chunk_size}"
         return None
@@ -217,7 +220,7 @@ class FlaGDNPhase6Backend:
             return self._use_preparation_result(cached)
 
         try:
-            operator, symbol = resolve_gdn_core_fwd_phase6()
+            operator, symbol = resolve_chunk_gated_delta_rule_fwd()
         except Exception as exc:
             result = _PreparationResult(
                 ready=False,
@@ -249,7 +252,8 @@ class FlaGDNPhase6Backend:
             self._log_once(
                 ("selected", self.signature),
                 logger.info,
-                "GDN Phase6 selection: backend=fla_npu symbol=%s soc=%s layer=%s",
+                "A5 GDN selection: backend=fla_npu implementation=a5_prepare_pipeline "
+                "symbol=%s soc=%s layer=%s",
                 result.symbol,
                 self.signature.soc,
                 self.layer_name,
@@ -263,14 +267,14 @@ class FlaGDNPhase6Backend:
             f"heads={self.signature.num_key_heads}/{self.signature.num_value_heads} "
             f"dims={self.signature.key_dim}/{self.signature.value_dim} "
             f"chunk_size={self.signature.chunk_size} layer={self.layer_name} "
-            f"symbol={result.symbol or GDN_PHASE6_SYMBOL}"
+            f"symbol={result.symbol or GDN_FWD_SYMBOL}"
         )
         if self.mode is GDNBackendMode.FLA_NPU:
-            raise RuntimeError(f"GDN Phase6 strict fla_npu selection failed: {details}")
+            raise RuntimeError(f"A5 GDN strict fla_npu selection failed: {details}")
         self._log_once(
             ("prepare-fallback", self.signature, result.stage, result.reason),
             logger.warning,
-            "GDN Phase6 selection: backend=native requested=auto %s",
+            "A5 GDN selection: backend=native requested=auto %s",
             details,
         )
         return False
@@ -280,14 +284,14 @@ class FlaGDNPhase6Backend:
         dtype = getattr(torch, signature.dtype)
         state_dtype = getattr(torch, signature.state_dtype)
         q = torch.full(
-            (1, signature.num_key_heads, _SCRATCH_TOKENS, signature.key_dim),
+            (1, _SCRATCH_TOKENS, signature.num_key_heads, signature.key_dim),
             0.125,
             dtype=dtype,
             device=device,
         )
         k = torch.full_like(q, 0.25)
         v = torch.full(
-            (1, signature.num_value_heads, _SCRATCH_TOKENS, signature.value_dim),
+            (1, _SCRATCH_TOKENS, signature.num_value_heads, signature.value_dim),
             0.0625,
             dtype=dtype,
             device=device,
@@ -298,9 +302,14 @@ class FlaGDNPhase6Backend:
             dtype=torch.float32,
             device=device,
         )
-        beta = torch.full_like(g, 0.5)
+        beta = torch.full(
+            (1, _SCRATCH_TOKENS, signature.num_value_heads),
+            0.5,
+            dtype=dtype,
+            device=device,
+        )
         state = torch.zeros(
-            (1, signature.num_value_heads, signature.key_dim, signature.value_dim),
+            (1, signature.num_value_heads, signature.value_dim, signature.key_dim),
             dtype=state_dtype,
             device=device,
         )
@@ -316,28 +325,36 @@ class FlaGDNPhase6Backend:
             cu_seqlens=[0, _SCRATCH_TOKENS],
             chunk_indices=[0, 0],
             scale=signature.key_dim**-0.5,
+            use_exp2=True,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=False,
+            use_beta_sigmoid_in_kernel=False,
+            allow_neg_eigval=False,
+            output_a=False,
+            state_v_first=True,
+            layout="BSND",
         )
         if not isinstance(result, (tuple, list)) or len(result) != 4:
-            raise RuntimeError("Phase6 scratch probe must return four outputs")
+            raise RuntimeError("FLA GDN scratch probe must return four outputs")
         output, final_state, _, _ = result
         expected_output = (
             1,
-            signature.num_value_heads,
             _SCRATCH_TOKENS,
+            signature.num_value_heads,
             signature.value_dim,
         )
-        expected_state = (1, signature.num_value_heads, signature.key_dim, signature.value_dim)
+        expected_state = (1, signature.num_value_heads, signature.value_dim, signature.key_dim)
         if tuple(output.shape) != expected_output:
             raise RuntimeError(
-                f"Phase6 scratch output shape {tuple(output.shape)} != {expected_output}"
+                f"FLA GDN scratch output shape {tuple(output.shape)} != {expected_output}"
             )
         if final_state is None or tuple(final_state.shape) != expected_state:
             actual = None if final_state is None else tuple(final_state.shape)
-            raise RuntimeError(f"Phase6 scratch final-state shape {actual} != {expected_state}")
+            raise RuntimeError(f"FLA GDN scratch final-state shape {actual} != {expected_state}")
         if device.type == "npu":
             torch.npu.synchronize()
         if not torch.isfinite(output).all().item() or not torch.isfinite(final_state).all().item():
-            raise RuntimeError("Phase6 scratch probe returned non-finite output")
+            raise RuntimeError("FLA GDN scratch probe returned non-finite output")
 
     def prefill(
         self,
@@ -350,37 +367,45 @@ class FlaGDNPhase6Backend:
         initial_state: torch.Tensor,
         has_initial_state: torch.Tensor,
         scale: float,
-        metadata: GDNPhase6PrefillMetadata,
+        metadata: GDNPrefillMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self._operator is None:
-            raise RuntimeError("GDN Phase6 backend must be prepared before prefill")
+            raise RuntimeError("FLA GDN backend must be prepared before prefill")
 
-        output_dtype = q.dtype
-        q = l2norm_fwd(q)
-        k = l2norm_fwd(k)
+        # vLLM stores GDN activations as BSND and recurrent state as
+        # [N, Hv, V, K]. PR #472 accepts both layouts directly and performs
+        # Q/K L2 normalization inside ChunkGatedDeltaRuleFwdPrepare.
         state = initial_state.clone()
         state[~has_initial_state, ...] = 0
-        state = state.transpose(-1, -2).contiguous()
-        cu_seqlens = list(metadata.cu_seqlens_host)
-        chunk_indices = list(metadata.chunk_indices_host)
+        cu_seqlens = metadata.cu_seqlens_host
+        chunk_indices = metadata.chunk_indices_host
 
         try:
             output, final_state, _, _ = self._operator(
-                q.transpose(1, 2).contiguous(),
-                k.transpose(1, 2).contiguous(),
-                v.transpose(1, 2).contiguous(),
+                q,
+                k,
+                v,
                 g,
-                beta.float(),
+                beta,
                 initial_state=state,
                 output_final_state=True,
                 chunk_size=self.signature.chunk_size,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=chunk_indices,
                 scale=scale,
+                use_exp2=True,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=False,
+                use_beta_sigmoid_in_kernel=False,
+                allow_neg_eigval=False,
+                output_a=False,
+                state_v_first=True,
+                layout="BSND",
             )
         except Exception:
             logger.exception(
-                "GDN Phase6 execution failed: backend=fla_npu symbol=%s soc=%s layer=%s inputs=%s",
+                "A5 GDN execution failed: backend=fla_npu "
+                "implementation=a5_prepare_pipeline symbol=%s soc=%s layer=%s inputs=%s",
                 self.symbol,
                 self.signature.soc,
                 self.layer_name,
@@ -395,7 +420,4 @@ class FlaGDNPhase6Backend:
             )
             raise
 
-        return (
-            output.to(output_dtype).transpose(1, 2).contiguous(),
-            final_state.transpose(-1, -2).contiguous(),
-        )
+        return output, final_state

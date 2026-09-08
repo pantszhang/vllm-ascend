@@ -72,8 +72,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Select the Qwen GDN operator backend. Valid values are "auto",
-    # "fla_npu", and "native". A2, A3, and A5 default to auto selection;
-    # unsupported devices keep using the native implementation.
+    # "fla_npu", and "native". The current FLA integration targets A5;
+    # A2, A3, and other devices keep using the native implementation.
     "VLLM_ASCEND_GDN_BACKEND": lambda: os.getenv("VLLM_ASCEND_GDN_BACKEND", "auto").lower(),
 }
 

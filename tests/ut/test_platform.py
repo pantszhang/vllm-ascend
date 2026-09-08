@@ -27,20 +27,13 @@ from vllm_ascend.utils import (
 
 
 class TestFlaGDNPreload(PytestBase):
-    @pytest.mark.parametrize(
-        "device_type",
-        [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5],
-    )
     @pytest.mark.parametrize("backend", ["auto", "fla_npu"])
-    def test_preloads_phase6_on_supported_accelerators(
-        self, monkeypatch, device_type, backend
-    ):
-        """Catch regressions that restrict FLA OPP preload to A5."""
+    def test_preloads_fla_gdn_on_a5(self, monkeypatch, backend):
         imported_modules = []
         monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", backend)
         monkeypatch.setattr(
             "vllm_ascend.device.device_config.get_ascend_device_type",
-            lambda: device_type,
+            lambda: AscendDeviceType.A5,
         )
         monkeypatch.setattr(
             "importlib.import_module",
@@ -54,11 +47,13 @@ class TestFlaGDNPreload(PytestBase):
     @pytest.mark.parametrize(
         ("device_type", "backend"),
         [
+            (AscendDeviceType.A2, "auto"),
+            (AscendDeviceType.A3, "auto"),
             (AscendDeviceType._310P, "auto"),
             (AscendDeviceType.A2, "native"),
         ],
     )
-    def test_skips_phase6_preload_for_ineligible_configurations(
+    def test_skips_fla_gdn_preload_for_ineligible_configurations(
         self, monkeypatch, device_type, backend
     ):
         imported_modules = []
@@ -80,7 +75,7 @@ class TestFlaGDNPreload(PytestBase):
         monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
         monkeypatch.setattr(
             "vllm_ascend.device.device_config.get_ascend_device_type",
-            lambda: AscendDeviceType.A2,
+            lambda: AscendDeviceType.A5,
         )
         monkeypatch.setattr(
             "importlib.import_module",
@@ -98,14 +93,14 @@ class TestFlaGDNPreload(PytestBase):
         monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "fla_npu")
         monkeypatch.setattr(
             "vllm_ascend.device.device_config.get_ascend_device_type",
-            lambda: AscendDeviceType.A3,
+            lambda: AscendDeviceType.A5,
         )
         monkeypatch.setattr(
             "importlib.import_module",
             MagicMock(side_effect=FileNotFoundError("missing FLA OPP")),
         )
 
-        with pytest.raises(RuntimeError, match="strict GDN Phase6 preload") as error:
+        with pytest.raises(RuntimeError, match="strict A5 GDN preload") as error:
             _import_fla_npu_before_custom_opp()
 
         assert isinstance(error.value.__cause__, FileNotFoundError)

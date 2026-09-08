@@ -56,25 +56,17 @@ def test_device_config_uses_build_info(monkeypatch):
     assert get_ascend_device_type() is AscendDeviceType.A3
 
 
-@pytest.mark.parametrize(
-    ("device_type", "expected_soc"),
-    [
-        ("A2", "ascend910b"),
-        ("A3", "ascend910_93"),
-        ("A5", "ascend950"),
-    ],
-)
-def test_fla_gdn_is_supported_on_accelerator_families(monkeypatch, device_type, expected_soc):
-    """Catch regressions that restrict the shared FLA GDN operator to A5."""
-    monkeypatch.setattr(_build_info, "__device_type__", device_type)
+def test_fla_gdn_is_supported_on_a5(monkeypatch):
+    monkeypatch.setattr(_build_info, "__device_type__", "A5")
 
     assert is_fla_gdn_supported()
-    assert get_fla_gdn_soc() == expected_soc
+    assert get_fla_gdn_soc() == "ascend950"
 
 
-def test_fla_gdn_is_not_enabled_on_310p(monkeypatch):
-    """Keep unsupported hardware on the existing native GDN path."""
-    monkeypatch.setattr(_build_info, "__device_type__", "_310P")
+@pytest.mark.parametrize("device_type", ["A2", "A3", "_310P"])
+def test_fla_gdn_is_not_enabled_outside_a5(monkeypatch, device_type):
+    """Keep hardware outside the current A5 scope on native GDN."""
+    monkeypatch.setattr(_build_info, "__device_type__", device_type)
 
     assert not is_fla_gdn_supported()
     assert get_fla_gdn_soc() is None
