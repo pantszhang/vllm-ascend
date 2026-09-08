@@ -399,7 +399,7 @@ class FlaGDNPrefillBackend:
                 use_beta_sigmoid_in_kernel=False,
                 allow_neg_eigval=False,
                 output_a=False,
-                state_v_first=True,
+                state_v_first=False,
                 layout="BSND",
             )
         except Exception:
