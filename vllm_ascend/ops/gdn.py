@@ -32,6 +32,8 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+from fla_npu.ops import ascendc
+
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -593,7 +595,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self, query_non_spec, ssm_state
             )
             use_fla = fla_backend is not None and fla_backend.prepare(query_non_spec.device)
-            if use_fla:
+            if use_fla and False:
                 assert fla_backend is not None
                 chunk_meta = attn_metadata.non_spec_prefill_metadata.chunk
                 initial_state = ssm_state[prefill_state_indices]
@@ -625,7 +627,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     core_attn_out=core_attn_out_non_spec,
                     last_recurrent_state=last_recurrent_state,
                 )
-            elif AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1:
+            elif AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1 and False:
                 # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
                 # directly, so no transpose is needed. Advanced indexing already
                 # returns a copy, safe to clear in place.
@@ -645,6 +647,62 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
                 ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
             else:
+                # assert fla_backend is not None
+                # chunk_meta = attn_metadata.non_spec_prefill_metadata.chunk
+                initial_state = ssm_state[prefill_state_indices]
+                # core_attn_out_non_spec, last_recurrent_state = fla_backend.prefill(
+                #     q=query_non_spec,
+                #     k=key_non_spec,
+                #     v=value_non_spec,
+                #     g=g_non_spec,
+                #     beta=beta_non_spec,
+                #     initial_state=initial_state,
+                #     has_initial_state=prefill_has_initial_state,
+                #     scale=key_non_spec.shape[-1] ** -0.5,
+                #     metadata=GDNPrefillMetadata(
+                #         cu_seqlens_host=chunk_meta.cu_seqlens_host,
+                #         chunk_indices_host=chunk_meta.chunk_indices_chunk64_host,
+                #     ),
+                # )
+                #输出Vfirst=true的
+                core_attn_out_non_spec, last_recurrent_state, _, _ =ascendc.npu_chunk_gated_delta_rule_fwd(
+                    query_non_spec.contiguous(),
+                    key_non_spec.contiguous(),
+                    value_non_spec.contiguous(),
+                    g_non_spec.contiguous(),
+                    beta_non_spec.contiguous(),
+                    initial_state=initial_state.contiguous(),
+                    output_final_state=True,
+                    chunk_size=64,
+                    use_exp2=True,
+                    use_qk_l2norm_in_kernel=True,
+                    use_gate_in_kernel=False,
+                    use_beta_sigmoid_in_kernel=False,
+                    allow_neg_eigval=False,
+                    disable_recompute=True,
+                    state_v_first=True,
+                    layout="BSND",
+                )
+
+                _dump_gdn_debug_once(
+                    "fla",
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state_v_first=initial_state,
+                    initial_state_k_first=initial_state.transpose(-1, -2).contiguous(),
+                    core_attn_out=core_attn_out_non_spec,
+                    last_recurrent_state=last_recurrent_state,
+                )
+                logger.info("FLA core_attn_out_non_spec1303= %s",core_attn_out_non_spec)
+                logger.info("FLA last_recurrent_state1303= %s",last_recurrent_state)
+                # logger.info("FLA core_attn_out_non_spec.transpose1303= %s",core_attn_out_non_spec.transpose(1, 2).contiguous())
+                # logger.info("FLA core_attn_out_non_spec.transpose.shape1303 %s",core_attn_out_non_spec.transpose(1, 2).contiguous().shape)
+                # ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+
+                # 输出Kfirst，
                 initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
                 clear_ssm_states(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
@@ -663,6 +721,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ssm_state[prefill_state_indices] = (
                     last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
                 )
+                logger.info("=======================")
+                logger.info("native core_attn_out_non_spec1303= %s",core_attn_out_non_spec)
+                logger.info("navite last_recurrent_state1303= %s",last_recurrent_state.transpose(-1, -2).contiguous())
+                # logger.info("native core_attn_out_non_spec.shape1303= %s",core_attn_out_non_spec.shape)
+                logger.info("***********************")
                 # ---- 临时 debug dump：triton 分立链分支，只保存一次 ----
                 _dump_gdn_debug_once(
                     "native_chain",

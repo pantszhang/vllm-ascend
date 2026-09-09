@@ -11,6 +11,7 @@ from typing import Any, Callable, ClassVar, Self
 import torch
 from vllm.logger import init_logger
 
+
 logger = init_logger(__name__)
 
 GDN_FWD_SYMBOL = "fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd"
@@ -330,7 +331,7 @@ class FlaGDNPrefillBackend:
             use_gate_in_kernel=False,
             use_beta_sigmoid_in_kernel=False,
             allow_neg_eigval=False,
-            output_a=False,
+            disable_recompute=True,
             state_v_first=True,
             layout="BSND",
         )
@@ -399,10 +400,10 @@ class FlaGDNPrefillBackend:
             ),
         )   
 
-        logger.info("fla")
-        logger.info("q=%s",q)
-        logger.info("k=%s",k)
-        logger.info("v=%s",v)
+        # logger.info("fla")
+        # logger.info("q=%s",q)
+        # logger.info("k=%s",k)
+        # logger.info("v=%s",v)
         
         try:
             output, final_state, _, _ = self._operator(
@@ -422,7 +423,7 @@ class FlaGDNPrefillBackend:
                 use_gate_in_kernel=False,
                 use_beta_sigmoid_in_kernel=False,
                 allow_neg_eigval=False,
-                output_a=False,
+                disable_recompute=True,
                 state_v_first=True,
                 layout="BSND",
             )

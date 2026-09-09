@@ -370,10 +370,10 @@ def chunk_gated_delta_rule(
                 f"chunk_gated_delta_rule: The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
-    logger.info("chunk.py")
-    logger.info("q=%s",q)
-    logger.info("k=%s",k)
-    logger.info("v=%s",v)
+    # logger.info("chunk.py")
+    # logger.info("q=%s",q)
+    # logger.info("k=%s",k)
+    # logger.info("v=%s",v)
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = ChunkGatedDeltaRuleFunction.apply(
