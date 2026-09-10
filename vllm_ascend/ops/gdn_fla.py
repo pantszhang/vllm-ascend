@@ -10,7 +10,7 @@ from typing import Any, Callable, ClassVar, Self
 
 import torch
 from vllm.logger import init_logger
-
+import os
 
 logger = init_logger(__name__)
 
@@ -370,6 +370,12 @@ class FlaGDNPrefillBackend:
         scale: float,
         metadata: GDNPrefillMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # logger.info("4444ASCEND_CUSTOM_OPP_PATH=%s", os.environ.get("ASCEND_CUSTOM_OPP_PATH", "(未设置)"))
+        # os.environ['ASCEND_CUSTOM_OPP_PATH'] = (
+        #             "/usr/local/python3.11.10/lib/python3.11/site-packages/fla_npu/opp/vendors/fla_npu_transformer"
+        #             f":{os.environ.get('ASCEND_CUSTOM_OPP_PATH', '')}"
+        #         )
+        # logger.info("4444ASCEND_CUSTOM_OPP_PATH=%s", os.environ.get("ASCEND_CUSTOM_OPP_PATH", "(未设置)"))
         if self._operator is None:
             raise RuntimeError("FLA GDN backend must be prepared before prefill")
 
@@ -380,31 +386,32 @@ class FlaGDNPrefillBackend:
         state[~has_initial_state, ...] = 0
         cu_seqlens = metadata.cu_seqlens_host
         chunk_indices = metadata.chunk_indices_host
-        logger.info(
-            "[GDN FLA][prefill] calling operator: "
-            "symbol=%s callable=%s layer=%s inputs=%s",
-            self.symbol,
-            getattr(
-                self._operator,
-                "__qualname__",
-                getattr(self._operator, "__name__", repr(self._operator)),
-            ),
-            self.layer_name,
-            _tensor_call_metadata(
-                (q, k, v, g, beta),
-                {
-                    "initial_state": state,
-                    "cu_seqlens": cu_seqlens,
-                    "chunk_indices": chunk_indices,
-                },
-            ),
-        )   
+        # logger.info(
+        #     "[GDN FLA][prefill] calling operator: "
+        #     "symbol=%s callable=%s layer=%s inputs=%s",
+        #     self.symbol,
+        #     getattr(
+        #         self._operator,
+        #         "__qualname__",
+        #         getattr(self._operator, "__name__", repr(self._operator)),
+        #     ),
+        #     self.layer_name,
+        #     _tensor_call_metadata(
+        #         (q, k, v, g, beta),
+        #         {
+        #             "initial_state": state,
+        #             "cu_seqlens": cu_seqlens,
+        #             "chunk_indices": chunk_indices,
+        #         },
+        #     ),
+        # )   
 
         # logger.info("fla")
         # logger.info("q=%s",q)
         # logger.info("k=%s",k)
         # logger.info("v=%s",v)
         
+        # disable_recompute=True, 的情况下，把出参数后2个删掉
         try:
             output, final_state, _, _ = self._operator(
                 q,

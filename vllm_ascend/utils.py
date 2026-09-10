@@ -201,7 +201,12 @@ def _ensure_device_print_registered() -> None:
             "device_print requires _C_ascend.device_print ops to be available "
             "when custom ops are enabled in the current Ascend build."
         )
-
+    logger.info("1111ASCEND_CUSTOM_OPP_PATH=%s", os.environ.get("ASCEND_CUSTOM_OPP_PATH", "(未设置)"))
+    os.environ['ASCEND_CUSTOM_OPP_PATH'] = (
+        "/usr/local/python3.11.10/lib/python3.11/site-packages/fla_npu/opp/vendors/fla_npu_transformer"
+        f":{os.environ.get('ASCEND_CUSTOM_OPP_PATH', '')}"
+    )
+    logger.info("2222ASCEND_CUSTOM_OPP_PATH=%s", os.environ.get("ASCEND_CUSTOM_OPP_PATH", "(未设置)"))
     try:
         # Mark device_print ops side-effectful so FX/Inductor does not DCE or reorder these debug callbacks.
         _mark_op_side_effectful(torch.ops._C_ascend.device_print)
@@ -430,7 +435,7 @@ def enable_custom_op():
     if envs.VLLM_BATCH_INVARIANT or not get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
-
+    
     try:
         if not torch.compiler.is_compiling():
             bootstrap_custom_op_env()

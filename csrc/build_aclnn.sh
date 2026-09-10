@@ -215,8 +215,13 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "causal_conv1d"
         "recurrent_gated_delta_rule"
         "recurrent_kda"
-        "chunk_fwd_o"
-        "chunk_gated_delta_rule_fwd_h"
+        # chunk_fwd_o 不编入 A5 自定义算子包：与 FLA OPP 同名，内核解析时会把
+        # FLA 融合算子（prepare+fwd_h+fwd_o）的 o 阶段劫持到本包旧内核，
+        # 造成 ~4.6 的数值分叉。A5 的 native 路径走 triton 链，不需要这个 op。
+        # chunk_gated_delta_rule_fwd_h 必须保留：chunk_kda_fwd 的 kernel 源码
+        # 引用了它的头文件，且它不与融合算子的任何阶段重名（融合用的是
+        # ChunkFwdH，op 名不同），不参与抢占。
+
         "chunk_kda_fwd"
         "kda_gate_cumsum"
         "kda_layout_swap12"
