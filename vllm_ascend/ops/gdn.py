@@ -41,6 +41,7 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
+from vllm.logger import logger
 
 def _chunk_gated_delta_rule_fla_npu(
     q: torch.Tensor,
@@ -577,6 +578,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             ascend_config = get_ascend_config()
             if ascend_config.gdn_prefill_backend == "fla_npu":
+                logger.info("We are using fla_npu gdn_prefill_backend mode")
                 if get_pcp_group().world_size != 1:
                     raise RuntimeError("FLA fused GDN prefill currently requires PCP world size 1.")
                 initial_state = ssm_state[prefill_state_indices]
