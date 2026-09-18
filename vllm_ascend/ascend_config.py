@@ -458,7 +458,7 @@ class AscendConfig:
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
     enable_prefill_mc2: bool = False
-    gdn_prefill_backend: Literal["auto", "native", "fla_npu"] = "auto"
+    gdn_prefill_backend1: Literal["auto", "native", "fla_npu"] = "auto"
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
@@ -536,7 +536,7 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
-        if self.gdn_prefill_backend == "fla_npu":
+        if self.gdn_prefill_backend1 == "fla_npu":
             try:
                 from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd
             except ImportError as exc:

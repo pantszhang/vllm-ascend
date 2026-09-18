@@ -69,7 +69,7 @@ def _chunk_gated_delta_rule_fla_npu(
         cu_seqlens = prebuilt_meta.cu_seqlens_kern
         initial_state_kern = initial_state[keep_meta]
 
-    output, final_state = fused_fwd(
+    ret = fused_fwd(
         q,
         k,
         v,
@@ -82,12 +82,14 @@ def _chunk_gated_delta_rule_fla_npu(
         chunk_indices=chunk_indices,
         scale=scale,
         layout="BSND",
-        use_exp2=True,
+        use_exp2=False,
+        # use_exp2=True,
         use_qk_l2norm_in_kernel=True,
         allow_neg_eigval=False,
         disable_recompute=True,
         state_v_first=True,
     )
+    output, final_state, *_ = ret
     if keep_meta is not None:
         full_final_state = initial_state.clone()
         full_final_state[keep_meta] = final_state
@@ -577,7 +579,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
             ascend_config = get_ascend_config()
-            if ascend_config.gdn_prefill_backend == "fla_npu":
+            if ascend_config.gdn_prefill_backend1 == "fla_npu":
                 logger.info("We are using fla_npu gdn_prefill_backend mode")
                 if get_pcp_group().world_size != 1:
                     raise RuntimeError("FLA fused GDN prefill currently requires PCP world size 1.")
