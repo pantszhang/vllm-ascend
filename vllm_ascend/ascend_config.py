@@ -459,6 +459,7 @@ class AscendConfig:
     multistream_dsv4_dsa_overlap: bool = True
     enable_prefill_mc2: bool = False
     gdn_prefill_backend1: Literal["auto", "native", "fla_npu"] = "auto"
+    gdn_decode_backend1: Literal["auto", "native", "fla_npu"] = "auto"
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
@@ -533,6 +534,7 @@ class AscendConfig:
     _sparse_li_c8_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
     _c8_reshape_optim_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
     gdn_prefill_op: Any = dataclasses.field(default=None, init=False, repr=False)
+    gdn_decode_op: Any = dataclasses.field(default=None, init=False, repr=False)
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
@@ -546,6 +548,16 @@ class AscendConfig:
                     "fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd."
                 ) from exc
             self.gdn_prefill_op = chunk_gated_delta_rule_fwd
+        if self.gdn_decode_backend1 == "fla_npu":
+            try:
+                from fla_npu.ops.ascendc import recurrent_gated_delta_rule
+            except ImportError as exc:
+                raise RuntimeError(
+                    "gdn_decode_backend='fla_npu' requires a current "
+                    "flash-linear-attention-npu wheel providing "
+                    "fla_npu.ops.ascendc.recurrent_gated_delta_rule."
+                ) from exc
+            self.gdn_decode_op = recurrent_gated_delta_rule
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
